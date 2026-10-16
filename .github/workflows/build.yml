@@ -1,0 +1,57 @@
+name: Build Dynamic Shadows Android
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: xmake-io/github-action-setup-xmake@v1
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28c
+
+      - name: Configure
+        run: >-
+          xmake f -y -p android -a arm64-v8a -m release
+          --ndk=${{ steps.ndk.outputs.ndk-path }} --ndk_sdkver=28
+
+      - name: Build
+        run: xmake -y DynamicShadows
+
+      - name: Package
+        run: |
+          VERSION="$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p dist
+          cp build/android/arm64-v8a/release/DynamicShadows.levipack "dist/DynamicShadows-${VERSION}.levipack"
+          cp "dist/DynamicShadows-${VERSION}.levipack" "dist/DynamicShadows-${VERSION}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DynamicShadows-Android
+          path: |
+            build/android/arm64-v8a/release/DynamicShadows.so
+            dist/DynamicShadows-*.levipack
+            dist/DynamicShadows-*.zip
+          if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DynamicShadows-*.zip
+            dist/DynamicShadows-*.levipack
