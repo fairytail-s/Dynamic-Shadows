@@ -22,7 +22,7 @@ struct RuntimeConfig {
     std::atomic<float> strength{kDefaultStrength}, azimuth{kDefaultAzimuth}, elevation{kDefaultElevation}, tilt{kDefaultTilt};
     std::atomic<int> shadowRes{kDefaultShadowRes}, depthBits{24}, filterQuality{1}, updateInterval{1}, maxBatchDraws{4096};
     std::atomic<float> shadowDist{kDefaultShadowDist}, nearFraction{0.30f}, softness{0.85f}, depthBias{0.85f}, normalBias{0.65f};
-    std::atomic<float> fadeStart{0.85f}, tintRed{0.025f}, tintGreen{0.035f}, tintBlue{0.055f};
+    std::atomic<float> lightFade{0.8f}, fogFade{1.0f}, fadeStart{0.85f}, tintRed{0.025f}, tintGreen{0.035f}, tintBlue{0.055f};
 };
 
 struct BoolSetting {
@@ -64,6 +64,8 @@ inline constexpr std::array kFloatSettings{
     FloatSetting{"depth_bias", "Reduce surface speckles", "Raise if surfaces show shadow speckles. Lower if shadows start too far from objects.", "advanced", "surface_stability", &RuntimeConfig::depthBias, 0.85f, 0.10f, 3.0f, 0.05f},
     FloatSetting{"normal_bias", "Shadow contact offset", "Lower values keep shadows closer to the object. Raise if edges show unwanted streaks.", "advanced", "surface_stability", &RuntimeConfig::normalBias, 0.65f, 0.0f, 3.0f, 0.05f},
     FloatSetting{"fade_start", "Start distance fading", "Keep shadows at full strength until this portion of their maximum distance.", "appearance", "shadow_edges", &RuntimeConfig::fadeStart, 0.85f, 0.30f, 0.95f, 0.05f},
+    FloatSetting{"light_fade", "Fade near light sources", "Shadows get weaker close to torches, glowstone and other light sources. 0 turns it off.", "appearance", "shadow_style", &RuntimeConfig::lightFade, 0.8f, 0.0f, 1.0f, 0.05f},
+    FloatSetting{"fog_fade", "Fade in fog", "Shadows fade out where the game's fog covers the world, so distant fogged terrain stays flat. 0 turns it off.", "appearance", "shadow_style", &RuntimeConfig::fogFade, 1.0f, 0.0f, 1.0f, 0.05f},
     FloatSetting{"azimuth", "Sun compass direction", "Fixed sun direction, or sunrise direction when following the day cycle.", "lighting", "light_position", &RuntimeConfig::azimuth, 90.0f, 0.0f, 360.0f, 5.0f},
     FloatSetting{"elevation", "Fixed sun height", "Light angle above the horizon when the day cycle is turned off.", "lighting", "light_position", &RuntimeConfig::elevation, 55.0f, 10.0f, 85.0f, 1.0f},
     FloatSetting{"sun_tilt", "Sun path tilt", "Tilt the daily light path toward the north or south.", "lighting", "light_position", &RuntimeConfig::tilt, 0.0f, -60.0f, 60.0f, 1.0f},

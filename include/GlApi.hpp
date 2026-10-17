@@ -27,7 +27,8 @@ constexpr GLint GL_NEAREST = 0x2600, GL_LINEAR = 0x2601, GL_CLAMP_TO_EDGE = 0x81
 constexpr GLenum GL_TEXTURE_WIDTH = 0x1000, GL_TEXTURE_HEIGHT = 0x1001, GL_TEXTURE_INTERNAL_FORMAT = 0x1003;
 
 constexpr GLenum GL_DEPTH24_STENCIL8 = 0x88F0, GL_DEPTH32F_STENCIL8 = 0x8CAD;
-constexpr GLbitfield GL_DEPTH_BUFFER_BIT = 0x0100;
+constexpr GLbitfield GL_DEPTH_BUFFER_BIT = 0x0100, GL_COLOR_BUFFER_BIT = 0x4000;
+constexpr GLenum GL_COLOR_CLEAR_VALUE = 0x0C22, GL_EXTENSIONS = 0x1F03;
 
 constexpr GLenum GL_SCISSOR_TEST = 0x0C11, GL_DEPTH_TEST = 0x0B71, GL_BLEND = 0x0BE2, GL_CULL_FACE = 0x0B44, GL_STENCIL_TEST = 0x0B90;
 constexpr GLenum GL_DITHER = 0x0BD0, GL_RASTERIZER_DISCARD = 0x8C89, GL_DEPTH_WRITEMASK = 0x0B72, GL_COLOR_WRITEMASK = 0x0C23;
@@ -78,6 +79,9 @@ struct Gl {
     GLint (*GetUniformLocation)(GLuint, const GLchar*);
     void (*UseProgram)(GLuint);
     void (*Uniform1i)(GLint, GLint);
+    void (*Uniform1f)(GLint, GLfloat);
+    void (*ClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
+    const unsigned char* (*GetString)(GLenum);
     void (*Uniform4f)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
     void (*GetIntegerv)(GLenum, GLint*);
     void (*GetBooleanv)(GLenum, GLboolean*);

@@ -24,7 +24,8 @@ add_library(DynamicShadows SHARED
   src/GameTime.cpp
   src/ElfPatch.cpp
   src/GlHooks.cpp
-  src/DrawBatch.cpp)
+  src/DrawBatch.cpp
+  src/ShaderPatch.cpp)
 
 set_target_properties(DynamicShadows PROPERTIES PREFIX "" OUTPUT_NAME "DynamicShadows")
 target_include_directories(DynamicShadows PRIVATE include vendor)

@@ -32,7 +32,12 @@ uniform vec4 uTint;
 uniform vec4 uFilter;
 uniform vec4 uAtlas;
 in vec2 uv;
+#if defined(SHADOW_WORLD) && defined(FB_FETCH)
+layout(location = 0) inout highp vec4 outColor;  // GL_EXT_shader_framebuffer_fetch: starts as the scene colour on the screen
+uniform vec4 uLight;  // x = 1: the scene's alpha holds the shadow multiplier
+#else
 out vec4 outColor;
+#endif
 
 float shadowTaps(vec2 base, float ref, int cascadeIndex)
 {
@@ -52,6 +57,11 @@ float shadowTaps(vec2 base, float ref, int cascadeIndex)
 }
 void result(float shadow)
 {
+#if defined(SHADOW_WORLD) && defined(FB_FETCH)
+    // The scene's alpha holds the shadow multiplier (written by the rewritten game shaders): shadows fade out next to torches, glowstone,
+    // ... and in fog.
+    if (uLight.x > 0.0) shadow *= outColor.a;
+#endif
     if (uTint.w > 0.5) outColor = vec4(vec3(1.0 - shadow), 1.0);
     else outColor = vec4(uTint.rgb, shadow * uSun.w);
 }

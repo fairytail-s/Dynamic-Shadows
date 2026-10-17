@@ -8,6 +8,7 @@ Dynamic Shadows is an open-source native mod for Minecraft Bedrock on Android, m
 - Performance, Balanced, High, and Ultra presets
 - Adjustable darkness, softness, distance, and shadow color
 - Hand and held-item shading
+- Shadows fade out next to torches, glowstone and other light sources ("Fade near light sources", needs GL_EXT_shader_framebuffer_fetch)
 - Categorized mod-menu settings with persistent configuration
 
 ## Requirements
@@ -41,3 +42,10 @@ cmake --build build-cmake --parallel
 ```
 
 Both builds produce `DynamicShadows.so` and `DynamicShadows.levipack`.
+
+## Light source fade
+
+The mod rewrites the game's block and entity fragment shaders when they are compiled (`src/ShaderPatch.cpp`, glShaderSource hook) so that
+opaque pixels carry `1 - block light` in the scene's alpha channel. The shadow pass reads that alpha with
+`GL_EXT_shader_framebuffer_fetch` (no extra copy of the scene) and weakens shadows where block light is high. Afterwards alpha is set back to 1.
+Draws that have alpha writes switched off by the game get them switched on for that draw only.

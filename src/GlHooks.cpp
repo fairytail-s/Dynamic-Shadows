@@ -5,6 +5,7 @@
 #include "ElfPatch.hpp"
 #include "GameTime.hpp"
 #include "GlApi.hpp"
+#include "ShaderPatch.hpp"
 #include "Shaders.hpp"
 #include "ShadowMath.hpp"
 #include "Sun.hpp"
@@ -32,12 +33,13 @@ namespace {
 void drainErrors() { for (unsigned i = 0; i < 16 && real.GetError() != 0; ++i) {} }
 
 enum Slot { kDrawElements, kDrawArrays, kDrawElementsInstanced, kDrawArraysInstanced, kClear, kUniformMatrix4fv, kEnable, kDisable,
-            kDepthMask, kDepthFunc, kBindFramebuffer, kUseProgram, kSlotCount };
+            kDepthMask, kDepthFunc, kBindFramebuffer, kUseProgram, kShaderSource, kColorMask, kSlotCount };
 std::atomic<void*> gOrig[kSlotCount];
 std::atomic<void*> gSwapOrig{nullptr};
 std::atomic<void*> gEglOrig{nullptr};
 std::atomic_bool gActive{false};
 bool gBatchAvailable = false;
+std::atomic<unsigned> gLightPatched{0};  // fragment shaders rewritten for the light source fade (blocks + entities)
 
 std::atomic_bool gSwapViaGot{false};
 std::atomic_bool gSwapFallbackTried{false};
@@ -59,7 +61,7 @@ struct Attach {
 template<std::size_t N> struct ShaderVariant { GLuint program{}; std::array<GLint, N> locations{}; };
 
 struct Own {
-    std::array<ShaderVariant<15>, 4> worldShaders;
+    std::array<ShaderVariant<16>, 8> worldShaders;
     std::array<ShaderVariant<9>, 2> handShaders;
     int worldVariant{-1}, handVariant{-1};
     GLuint vao = 0, blitFbo = 0, depthTex = 0;
@@ -74,7 +76,9 @@ struct Own {
     bool directFailed = false;
     bool smFailed = false;
     unsigned smGen = 0;
-    GLint smDepth = -1, smShadow = -1, smInvVP = -1, smLightVP0 = -1, smLightVP1 = -1, smCam = -1, smSun = -1, smSm0 = -1, smSm1 = -1, smMisc = -1, smTint = -1, smFilterUniform = -1, smAtlas = -1, smTuning = -1, smDepthRect = -1;
+    GLint smDepth = -1, smShadow = -1, smInvVP = -1, smLightVP0 = -1, smLightVP1 = -1, smCam = -1, smSun = -1, smSm0 = -1, smSm1 = -1, smMisc = -1, smTint = -1, smFilterUniform = -1, smAtlas = -1, smTuning = -1, smDepthRect = -1, smLight = -1;
+    bool smFetch = false;       // the world pass reads the scene alpha (block light) with framebuffer fetch
+    bool fetchFailed = false;   // framebuffer fetch is not usable: no light source fade
 
     GLuint handProgram = 0;
     bool handFailed = false;
@@ -90,6 +94,8 @@ struct SceneInfo {
 struct ProgInfo {
     unsigned generation = 0;
     GLint view = -1, proj = -1, viewProj = -1, modelView = -1, modelViewProj = -1;
+    GLint light = -1;           // uShadowLight, only in fragment shaders ShaderPatch rewrote
+    float lightVal[2] = {-1.0f, -1.0f};  // last values uploaded to it (light fade strength, fog fade strength)
     Mat4 vView{}, vProj{}, vVP{}, vMV{}, vMVP{};
     bool hView = false, hProj = false, hVP = false, hMV = false, hMVP = false;
 };
@@ -131,11 +137,14 @@ struct State {
     struct Tracked {
         GLint fbo = -1, program = -1, depthFunc = -1;
         signed char depthTest = -1, blend = -1, scissor = -1, depthMask = -1;
+        GLboolean mask[4]{1, 1, 1, 1};  // glColorMask
+        bool maskKnown = false;
         bool bad = false;
     } tr;
     GLuint cachedProg = 0;
     ProgInfo* cachedInfo = nullptr;
     bool shadowedThisFrame = false;
+    bool alphaForced = false;  // this draw runs with alpha writes switched on by us (see updateLightMode)
 
     unsigned opaqueSeen = 0, prevOpaqueSeen = 0;
     unsigned opaqueAtTrigger = 0;
@@ -227,6 +236,7 @@ ProgInfo& progInfo(State& st, GLuint program) {
     pi.viewProj = real.GetUniformLocation(program, "u_viewProj");
     pi.modelView = real.GetUniformLocation(program, "u_modelView");
     pi.modelViewProj = real.GetUniformLocation(program, "u_modelViewProj");
+    pi.light = real.GetUniformLocation(program, kLightUniform);
     ProgInfo& stored = st.progs.emplace(program, pi).first->second;
     st.cachedProg = program;
     st.cachedInfo = &stored;
@@ -392,7 +402,7 @@ void restore(const Saved& s) {
     real.ColorMask(s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]);
 }
 
-GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool cascades) {
+GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool cascades, bool fetch = false) {
     const std::string defines = std::string("#define SHADOW_SMOOTH ") + (smooth ? "1\n" : "0\n") +
         (world ? std::string("#define SHADOW_WORLD 1\n#define SHADOW_CASCADES ") + (cascades ? "1\n" : "0\n") : "");
     const auto specialize = [&](const char* source) {
@@ -401,7 +411,10 @@ GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool casc
         return result;
     };
     const std::string vertex = specialize(kVertexShader);
-    const std::string fragment = specialize(kFragmentCommon) + fragmentBody;
+    std::string fragment = specialize(kFragmentCommon) + fragmentBody;
+    if (fetch) {  // the #extension line has to come right after #version
+        fragment.insert(fragment.find('\n') + 1, "#extension GL_EXT_shader_framebuffer_fetch : require\n#define FB_FETCH 1\n");
+    }
     const GLuint vs = real.CreateShader(GL_VERTEX_SHADER);
     const GLuint fs = real.CreateShader(GL_FRAGMENT_SHADER);
     GLuint program = 0;
@@ -422,22 +435,37 @@ GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool casc
     return program;
 }
 
-bool ensureShadowProgram(Own& own, bool cascades) {
+// GL_EXT_shader_framebuffer_fetch: the world pass reads the scene's alpha (the block light) straight from the framebuffer, no copy needed.
+bool hasFramebufferFetch() {
+    static const bool has = [] {
+        const char* ext = real.GetString ? reinterpret_cast<const char*>(real.GetString(GL_EXTENSIONS)) : nullptr;
+        const bool ok = ext && std::strstr(ext, "GL_EXT_shader_framebuffer_fetch") != nullptr;
+        return ok;
+    }();
+    return has;
+}
+
+bool ensureShadowProgram(Own& own, bool cascades, bool fetch) {
     const bool smooth = own.smFilter == 2;
-    const int index = (cascades ? 2 : 0) + int(smooth);
-    if (own.smProgram && own.worldVariant == index) return true;
+    const int index = (fetch ? 4 : 0) + (cascades ? 2 : 0) + int(smooth);
+    if (own.smProgram && own.worldVariant == index) { own.smFetch = fetch; return true; }
     auto& variant = own.worldShaders[index];
     if (!variant.program) {
-        variant.program = buildProgram(kShadowMapBody, true, smooth, cascades);
+        variant.program = buildProgram(kShadowMapBody, true, smooth, cascades, fetch);
+        if (!variant.program && fetch) {
+            own.fetchFailed = true;
+            return ensureShadowProgram(own, cascades, false);
+        }
         if (!variant.program) { own.smFailed = true; return false; }
-        constexpr const char* names[]{"uDepth", "uShadow", "uInvVP", "uLightVP0", "uLightVP1", "uCam", "uSun", "uSm0", "uSm1", "uMisc", "uTint", "uFilter", "uAtlas", "uTuning", "uDepthRect"};
+        constexpr const char* names[]{"uDepth", "uShadow", "uInvVP", "uLightVP0", "uLightVP1", "uCam", "uSun", "uSm0", "uSm1", "uMisc", "uTint", "uFilter", "uAtlas", "uTuning", "uDepthRect", "uLight"};
         for (std::size_t i = 0; i < variant.locations.size(); ++i) variant.locations[i] = real.GetUniformLocation(variant.program, names[i]);
     }
-    const std::array<GLint*, 15> locations{&own.smDepth, &own.smShadow, &own.smInvVP, &own.smLightVP0, &own.smLightVP1, &own.smCam, &own.smSun,
-        &own.smSm0, &own.smSm1, &own.smMisc, &own.smTint, &own.smFilterUniform, &own.smAtlas, &own.smTuning, &own.smDepthRect};
+    const std::array<GLint*, 16> locations{&own.smDepth, &own.smShadow, &own.smInvVP, &own.smLightVP0, &own.smLightVP1, &own.smCam, &own.smSun,
+        &own.smSm0, &own.smSm1, &own.smMisc, &own.smTint, &own.smFilterUniform, &own.smAtlas, &own.smTuning, &own.smDepthRect, &own.smLight};
     for (std::size_t i = 0; i < locations.size(); ++i) *locations[i] = variant.locations[i];
     own.smProgram = variant.program;
     own.worldVariant = index;
+    own.smFetch = fetch;
     if (!own.vao) real.GenVertexArrays(1, &own.vao);
     return true;
 }
@@ -828,7 +856,7 @@ void noteSkip(State& st) {
     }
 }
 
-void runShadowPass(State& st, GLuint sceneFbo) {
+void runShadowPassImpl(State& st, GLuint sceneFbo) {
     Own& own = st.own;
     if (own.failed) return;
     const auto& c = config();
@@ -903,7 +931,8 @@ void runShadowPass(State& st, GLuint sceneFbo) {
         restore(saved);
         return;
     }
-    if (!ensureShadowProgram(own, sf.cascades == 2)) {
+    const bool wantFetch = (c.lightFade.load() > 0.0f || c.fogFade.load() > 0.0f) && gLightPatched.load(std::memory_order_relaxed) > 0 && !own.fetchFailed && hasFramebufferFetch();
+    if (!ensureShadowProgram(own, sf.cascades == 2, wantFetch)) {
         restore(saved);
         return;
     }
@@ -982,6 +1011,7 @@ void runShadowPass(State& st, GLuint sceneFbo) {
     real.Uniform4f(own.smFilterUniform, static_cast<float>(c.filterQuality.load()), c.softness.load(), c.depthBias.load(), c.normalBias.load());
     real.Uniform4f(own.smAtlas, 1.0f / static_cast<float>(own.smColumns), own.smColumns == 2 ? 0.5f : 0.0f, 0.0f, 0.0f);
     real.Uniform4f(own.smTuning, c.fadeStart.load(), 0.0f, 0.0f, 0.0f);
+    if (own.smLight >= 0) real.Uniform4f(own.smLight, (c.lightFade.load() > 0.0f || c.fogFade.load() > 0.0f) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
     real.Uniform4f(own.smDepthRect, directDepth ? float(vx) / float(attachmentWidth) : 0.0f, directDepth ? float(vy) / float(attachmentHeight) : 0.0f,
                   directDepth ? float(w) / float(attachmentWidth) : 1.0f, directDepth ? float(h) / float(attachmentHeight) : 1.0f);
     real.BindVertexArray(own.vao);
@@ -1004,6 +1034,10 @@ void runShadowPass(State& st, GLuint sceneFbo) {
         ++own.assumeIdx;
         return;
     }
+    if (error != 0 && own.smFetch) {
+        own.fetchFailed = true;
+        return;
+    }
     if (error != 0) {
         own.failed = true;
 
@@ -1011,6 +1045,27 @@ void runShadowPass(State& st, GLuint sceneFbo) {
     }
 
     st.skips = 0;
+}
+
+// The rewritten game shaders write 1 - block light into the scene's alpha. Put alpha back to 1 (alpha-only clear) so the screen never sees it.
+void resetSceneAlpha(GLuint sceneFbo) {
+    Saved saved{};
+    save(saved);
+    GLfloat clearColor[4]{};
+    real.GetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
+    real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, sceneFbo);
+    real.Disable(GL_SCISSOR_TEST);
+    real.ColorMask(0, 0, 0, 1);
+    real.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    real.Clear(GL_COLOR_BUFFER_BIT);
+    real.ClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+    restore(saved);
+    drainErrors();
+}
+
+void runShadowPass(State& st, GLuint sceneFbo) {
+    runShadowPassImpl(st, sceneFbo);
+    if (gLightPatched.load(std::memory_order_relaxed) > 0) resetSceneAlpha(sceneFbo);
 }
 
 void runHandPass(State& st) {
@@ -1117,6 +1172,38 @@ void watchdogStuckFrame(State& st) {
     endFrame(st);
 }
 
+// The rewritten fragment shaders write 1 - block light into alpha only while uShadowLight is 1: opaque draws (blended draws use alpha as
+// opacity) before this frame's shadow pass (the pass puts alpha back to 1, so nothing drawn after it may write it). Some game materials
+// draw with alpha writes switched off (DisableAlphaWrite): for those draws the alpha mask is switched on and put back after the draw.
+void updateLightMode(State& st) {
+    const GLint program = trackedProgram(st);
+    if (program <= 0) return;
+    ProgInfo& pi = progInfo(st, static_cast<GLuint>(program));
+    if (pi.light < 0) return;
+    const auto& c = config();
+    const float lightStrength = c.lightFade.load(), fogStrength = c.fogFade.load();
+    const bool on = c.enabled.load() && (lightStrength > 0.0f || fogStrength > 0.0f) && !st.own.failed && !st.own.fetchFailed && !st.shadowedThisFrame && !trackedBlend(st);
+    const float a = on ? lightStrength : 0.0f, b = on ? fogStrength : 0.0f;
+    if (pi.lightVal[0] != a || pi.lightVal[1] != b) {
+        real.Uniform4f(pi.light, a, b, 0.0f, 0.0f);
+        pi.lightVal[0] = a;
+        pi.lightVal[1] = b;
+    }
+    if (!on) return;
+    if (!st.tr.maskKnown) {
+        real.GetBooleanv(GL_COLOR_WRITEMASK, st.tr.mask);
+        st.tr.maskKnown = true;
+    }
+    if (!st.tr.mask[3]) {
+        real.ColorMask(st.tr.mask[0], st.tr.mask[1], st.tr.mask[2], 1);
+        st.alphaForced = true;
+    }
+}
+void endForcedAlpha(State& st) {
+    real.ColorMask(st.tr.mask[0], st.tr.mask[1], st.tr.mask[2], st.tr.mask[3]);
+    st.alphaForced = false;
+}
+
 DrawCtx onDraw() {
     DrawCtx ctx;
     State& st = state();
@@ -1127,6 +1214,7 @@ DrawCtx onDraw() {
     watchdogStuckFrame(st);
     ++st.totalDraws;
     ++st.frameDraws;
+    if (gLightPatched.load(std::memory_order_relaxed) > 0) updateLightMode(st);
     const bool depthTest = trackedDepthTest(st);
     GLint fbo = -1, program = 0;
     auto drawFbo = [&] {
@@ -1241,6 +1329,39 @@ void useProgramDetour(GLuint program) {
     resolve(kUseProgram, real.UseProgram)(program);
 }
 
+void colorMaskDetour(GLboolean r, GLboolean gr, GLboolean b, GLboolean a) {
+    State& st = state();
+    st.tr.mask[0] = r; st.tr.mask[1] = gr; st.tr.mask[2] = b; st.tr.mask[3] = a;
+    st.tr.maskKnown = true;
+    resolve(kColorMask, real.ColorMask)(r, gr, b, a);
+}
+
+// glShaderSource: rewrite the render-chunk and actor fragment shaders (see ShaderPatch.cpp) before the game compiles them.
+void shaderSourceDetour(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
+    auto original = resolve(kShaderSource, real.ShaderSource);
+    if (count > 0 && string && gActive.load(std::memory_order_relaxed)) {
+        std::string source;
+        for (GLsizei i = 0; i < count; ++i) {
+            if (!string[i]) continue;
+            if (length && length[i] >= 0) source.append(string[i], static_cast<std::size_t>(length[i]));
+            else source.append(string[i]);
+        }
+        const LightPatch kind = patchLightShader(source);
+        if (kind == LightPatch::ChunkVertex) {
+            const char* p = source.c_str();
+            original(shader, 1, &p, nullptr);
+            return;
+        }
+        if (kind != LightPatch::None) {
+            gLightPatched.fetch_add(1, std::memory_order_relaxed);
+            const char* p = source.c_str();
+            original(shader, 1, &p, nullptr);
+            return;
+        }
+    }
+    original(shader, count, string, length);
+}
+
 void beforeDepthClear() {
     State& st = state();
     if (!hasContext(st)) return;
@@ -1260,21 +1381,25 @@ void clearDetour(GLbitfield mask) {
 void drawElementsDetour(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     const DrawCtx ctx = onDraw();
     resolve(kDrawElements, real.DrawElements)(mode, count, type, indices);
+    if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::Elements, mode, count, type, indices, 0, 1});
 }
 void drawArraysDetour(GLenum mode, GLint first, GLsizei count) {
     const DrawCtx ctx = onDraw();
     resolve(kDrawArrays, real.DrawArrays)(mode, first, count);
+    if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::Arrays, mode, count, 0, nullptr, first, 1});
 }
 void drawElementsInstancedDetour(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instances) {
     const DrawCtx ctx = onDraw();
     resolve(kDrawElementsInstanced, real.DrawElementsInstanced)(mode, count, type, indices, instances);
+    if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::ElementsInstanced, mode, count, type, indices, 0, instances});
 }
 void drawArraysInstancedDetour(GLenum mode, GLint first, GLsizei count, GLsizei instances) {
     const DrawCtx ctx = onDraw();
     resolve(kDrawArraysInstanced, real.DrawArraysInstanced)(mode, first, count, instances);
+    if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::ArraysInstanced, mode, count, 0, nullptr, first, instances});
 }
 
@@ -1355,6 +1480,8 @@ const HookName kHooks[kSlotCount] = {
     {"glDepthFunc", reinterpret_cast<void*>(&depthFuncDetour)},
     {"glBindFramebuffer", reinterpret_cast<void*>(&bindFramebufferDetour)},
     {"glUseProgram", reinterpret_cast<void*>(&useProgramDetour)},
+    {"glShaderSource", reinterpret_cast<void*>(&shaderSourceDetour)},
+    {"glColorMask", reinterpret_cast<void*>(&colorMaskDetour)},
 };
 
 using EglGetProcAddressFn = void* (*)(const char*);
@@ -1428,7 +1555,7 @@ bool installGlHooks() {
     LOAD(UseProgram); LOAD(Uniform1i); LOAD(Uniform4f); LOAD(GetIntegerv); LOAD(GetBooleanv); LOAD(IsEnabled); LOAD(Enable);
     LOAD(Disable); LOAD(Clear); LOAD(UniformMatrix4fv); LOAD(BlendFuncSeparate); LOAD(BlendEquationSeparate); LOAD(DrawBuffers); LOAD(DepthMask); LOAD(ColorMask); LOAD(Viewport); LOAD(GetError); LOAD(BindSampler);
     LOAD(GenSamplers); LOAD(SamplerParameteri); LOAD(GetTexLevelParameteriv); LOAD(GetRenderbufferParameteriv); LOAD(BindRenderbuffer); LOAD(GetFramebufferAttachmentParameteriv);
-    LOAD(ClearDepthf); LOAD(GetFloatv); LOAD(DepthFunc); LOAD(DepthRangef);
+    LOAD(ClearDepthf); LOAD(Uniform1f); LOAD(ClearColor); LOAD(GetString); LOAD(GetFloatv); LOAD(DepthFunc); LOAD(DepthRangef);
 #undef LOAD
     if (!complete) return false;
     gBatchAvailable = batch::loadApi(gles);

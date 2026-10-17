@@ -15,6 +15,10 @@ namespace shadow {
 namespace {
 constexpr const char* kGetTimeSignature =
     "? ? ? D1 ? ? ? A9 ? ? ? F9 ? ? ? A9 ? ? ? 91 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
+// Same function without its first five instructions. Another mod's inline hook (BedrockTools' Time Changer hooks this very function)
+// overwrites the start of the function, so the full signature above stops matching once it has been installed. The unpatched part still does.
+constexpr const char* kGetTimeTailSignature =
+    "? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
 constexpr const char* kGame = "libminecraftpe.so";
 
 using GetTimeFn = int (*)(void*);
@@ -49,13 +53,16 @@ enum class Attempt { Installed, NotLoaded, NotFound, HookFailed };
 Attempt tryInstall() {
     if (gActive.load()) return Attempt::Installed;
     if (!gameLoaded()) return Attempt::NotLoaded;
-    const auto match = elf::findUniqueExecutablePattern(kGame, kGetTimeSignature);
+    auto match = elf::findUniqueExecutablePattern(kGame, kGetTimeSignature);
+    if (match.matches != 1 || !match.address) match = elf::findUniqueExecutablePattern(kGame, kGetTimeTailSignature);
     if (match.matches != 1 || !match.address) {
         return Attempt::NotFound;
     }
     const std::uintptr_t address = match.address;
     void* original = nullptr;
-    if (pl::memory::hook(reinterpret_cast<void*>(address), reinterpret_cast<void*>(&getTimeDetour), &original) != 0 || !original) {
+    // Highest priority = outermost hook: the value seen here is the one the game really gets, even when another mod (Time Changer)
+    // replaces the time further down the chain.
+    if (pl::memory::hook(reinterpret_cast<void*>(address), reinterpret_cast<void*>(&getTimeDetour), &original, pl::memory::HookPriority::Highest) != 0 || !original) {
         return Attempt::HookFailed;
     }
     gOriginal.store(original, std::memory_order_release);
