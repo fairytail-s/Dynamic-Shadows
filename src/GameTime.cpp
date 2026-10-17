@@ -8,6 +8,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <dlfcn.h>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <mutex>
 #include <thread>
 
@@ -20,6 +22,7 @@ constexpr const char* kGetTimeSignature =
 constexpr const char* kGetTimeTailSignature =
     "? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
 constexpr const char* kGame = "libminecraftpe.so";
+constexpr std::chrono::seconds kInitialDelay{4};
 
 using GetTimeFn = int (*)(void*);
 std::atomic<void*> gOriginal{nullptr};
@@ -76,7 +79,7 @@ Attempt tryInstall() {
 bool installTimeHook() {
     // Never scan libminecraftpe.so on the caller's thread: the signature scan walks the whole executable segment (twice on a miss) and
     // can take seconds on a low-memory phone, which blocks the launcher's loader/UI thread (ANR). The worker tries immediately, then
-    // retries every 2 s (up to 60 times) while the game library is not loaded yet.
+    // waits 4 s before its first try, then retries every 2 s (up to 60 times) while the game library is not loaded yet.
     if (gActive.load()) return true;
     std::thread stale;
     {
@@ -93,11 +96,16 @@ bool installTimeHook() {
     gStopRetry = false;
     gWorkerDone = false;
     gRetry = std::thread([] {
+        // Lower priority so the scan never competes with the launcher's loader / UI thread on slow phones.
+        (void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::gettid()), 10);
         for (int i = 0; i < 60; ++i) {
             {
                 std::unique_lock<std::mutex> lock(gMutex);
                 if (gStopRetry) break;
-                if (i > 0 && gCv.wait_for(lock, std::chrono::seconds(2), [] { return gStopRetry; })) break;
+                // First attempt waits kInitialDelay so the launcher's own signature scan (and other mods') finishes first; later
+                // attempts retry every 2 s. Both waits wake immediately on gStopRetry, so disable() still cancels promptly.
+                const auto delay = i == 0 ? kInitialDelay : std::chrono::seconds(2);
+                if (gCv.wait_for(lock, delay, [] { return gStopRetry; })) break;
             }
             if (tryInstall() != Attempt::NotLoaded) break;
         }
