@@ -2,7 +2,7 @@
   "type": "preload-native",
   "name": "DynamicShadows",
   "author": "chromehaert",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "entry": "DynamicShadows.so",
   "minecraft_versions": [
     "1.26.*",

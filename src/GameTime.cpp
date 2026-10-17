@@ -1,6 +1,7 @@
 #include "GameTime.hpp"
 
 #include "ElfPatch.hpp"
+#include "PlayerShadow.hpp"
 
 #include <pl/memory/Hook.hpp>
 
@@ -17,6 +18,7 @@ namespace shadow {
 namespace {
 constexpr const char* kGetTimeSignature =
     "? ? ? D1 ? ? ? A9 ? ? ? F9 ? ? ? A9 ? ? ? 91 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
+
 
 constexpr const char* kGetTimeTailSignature =
     "? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
@@ -56,6 +58,7 @@ enum class Attempt { Installed, NotLoaded, NotFound, HookFailed };
 Attempt tryInstall() {
     if (gActive.load()) return Attempt::Installed;
     if (!gameLoaded()) return Attempt::NotLoaded;
+    (void)player::installHooks();
     auto match = elf::findUniqueExecutablePattern(kGame, kGetTimeSignature);
     if (match.matches != 1 || !match.address) match = elf::findUniqueExecutablePattern(kGame, kGetTimeTailSignature);
     if (match.matches != 1 || !match.address) {
@@ -63,6 +66,7 @@ Attempt tryInstall() {
     }
     const std::uintptr_t address = match.address;
     void* original = nullptr;
+
 
     if (pl::memory::hook(reinterpret_cast<void*>(address), reinterpret_cast<void*>(&getTimeDetour), &original, pl::memory::HookPriority::Highest) != 0 || !original) {
         return Attempt::HookFailed;
@@ -75,6 +79,8 @@ Attempt tryInstall() {
 }
 
 bool installTimeHook() {
+
+
 
     if (gActive.load()) return true;
     std::thread stale;
@@ -99,6 +105,7 @@ bool installTimeHook() {
                 std::unique_lock<std::mutex> lock(gMutex);
                 if (gStopRetry) break;
 
+
                 const auto delay = i == 0 ? kInitialDelay : std::chrono::seconds(2);
                 if (gCv.wait_for(lock, delay, [] { return gStopRetry; })) break;
             }
@@ -117,6 +124,7 @@ void removeTimeHook() {
         gCv.notify_all();
     }
     if (gRetry.joinable()) gRetry.join();
+    player::removeHooks();
     if (!gActive.exchange(false)) return;
     if (gTarget) (void)pl::memory::unhook(gTarget, reinterpret_cast<void*>(&getTimeDetour));
     gTarget = nullptr;

@@ -4,6 +4,7 @@
 #include "DrawBatch.hpp"
 #include "ElfPatch.hpp"
 #include "GameTime.hpp"
+#include "PlayerShadow.hpp"
 #include "GlApi.hpp"
 #include "ShaderPatch.hpp"
 #include "Shaders.hpp"
@@ -33,7 +34,7 @@ namespace {
 void drainErrors() { for (unsigned i = 0; i < 16 && real.GetError() != 0; ++i) {} }
 
 enum Slot { kDrawElements, kDrawArrays, kDrawElementsInstanced, kDrawArraysInstanced, kClear, kUniformMatrix4fv, kEnable, kDisable,
-            kDepthMask, kDepthFunc, kBindFramebuffer, kUseProgram, kShaderSource, kColorMask, kSlotCount };
+            kDepthMask, kDepthFunc, kBindFramebuffer, kUseProgram, kShaderSource, kColorMask, kScissor, kSlotCount };
 std::atomic<void*> gOrig[kSlotCount];
 std::atomic<void*> gSwapOrig{nullptr};
 std::atomic<void*> gEglOrig{nullptr};
@@ -106,6 +107,7 @@ struct ProgInfo {
 
 struct ShadowFrame {
     bool attempted = false, ok = false, haveView = false, reused = false;
+    bool playerCaster = false, expectPlayer = false;
     bool batchDraws = true, cullDraws = true, twoSided = false;
     int maxBatchDraws = 2048;
     float cameraForward[3]{};
@@ -142,7 +144,8 @@ struct State {
         GLint fbo = -1, program = -1, depthFunc = -1;
         signed char depthTest = -1, blend = -1, scissor = -1, depthMask = -1;
         GLboolean mask[4]{1, 1, 1, 1};
-        bool maskKnown = false;
+        bool maskKnown = false, scissorBoxKnown = false;
+        GLint scissorBox[4]{};
         bool bad = false;
     } tr;
     GLuint cachedProg = 0;
@@ -178,6 +181,16 @@ bool trackedDepthTest(State& st) { return trackedFlag(st, st.tr.depthTest, GL_DE
 bool trackedBlend(State& st) { return trackedFlag(st, st.tr.blend, GL_BLEND); }
 bool trackedScissor(State& st) { return trackedFlag(st, st.tr.scissor, GL_SCISSOR_TEST); }
 
+bool casterScissor(State& st) {
+    if (!player::hooksActive() || !trackedScissor(st)) return false;
+    if (st.tr.bad || !st.tr.scissorBoxKnown) {
+        real.GetIntegerv(GL_SCISSOR_BOX, st.tr.scissorBox);
+        st.tr.scissorBoxKnown = true;
+    }
+    const auto* box = st.tr.scissorBox;
+    return box[0] == player::kCasterScissorX && box[2] == 0 && box[3] == 0;
+}
+
 bool trackedDepthMask(State& st) {
     if (!st.tr.bad && st.tr.depthMask >= 0) return st.tr.depthMask != 0;
     GLboolean v = 0;
@@ -209,6 +222,11 @@ void verifyTracking(State& st) {
     else if (t.blend >= 0 && (real.IsEnabled(GL_BLEND) != 0) != (t.blend != 0)) wrong = "blend";
     else if (t.scissor >= 0 && (real.IsEnabled(GL_SCISSOR_TEST) != 0) != (t.scissor != 0)) wrong = "scissor";
     else if (t.depthMask >= 0 && (real.GetBooleanv(GL_DEPTH_WRITEMASK, &b), (b != 0) != (t.depthMask != 0))) wrong = "depth mask";
+    if (!wrong && t.scissorBoxKnown) {
+        GLint box[4]{};
+        real.GetIntegerv(GL_SCISSOR_BOX, box);
+        if (std::memcmp(box, t.scissorBox, sizeof(box))) wrong = "scissor box";
+    }
     if (wrong) {
         batch::resynchronize();
         st.sf.ok = false;
@@ -443,6 +461,7 @@ GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool casc
     return program;
 }
 
+
 bool hasFramebufferFetch() {
     static const bool has = [] {
         const char* ext = real.GetString ? reinterpret_cast<const char*>(real.GetString(GL_EXTENSIONS)) : nullptr;
@@ -578,6 +597,7 @@ bool beginShadowFrame(State& st, const ProgInfo& pi, GLuint fbo) {
     Mat4 camVP{}, camView{};
     bool haveVP = false;
     sf.haveView = false;
+    sf.expectPlayer = player::casterExpected();
     if (pi.hView && plausibleView(pi.vView)) {
         camView = pi.vView;
         sf.haveView = true;
@@ -633,7 +653,7 @@ bool beginShadowFrame(State& st, const ProgInfo& pi, GLuint fbo) {
     if (interval > 1 && st.cachedShadowValid && st.cachedMapGeneration == own.smGen && st.mapKey == st.cachedMapKey &&
         st.cachedShadow.fbo == static_cast<GLint>(fbo) && st.frame - st.cachedShadowFrame < static_cast<unsigned>(interval) && sf.haveView && sf.anchorValid &&
         st.cachedShadow.anchorValid && sf.anchorKey == st.cachedShadow.anchorKey && sf.anchorMVP == st.cachedShadow.anchorMVP &&
-        sf.cameraVP == st.cachedShadow.cameraVP) {
+        sf.cameraVP == st.cachedShadow.cameraVP && sf.expectPlayer == st.cachedShadow.expectPlayer) {
         const auto& cached = st.cachedShadow;
         float delta = 0.0f, facing = 0.0f;
         for (int i = 0; i < 3; ++i) {
@@ -705,7 +725,7 @@ struct DrawCall {
 };
 
 struct DrawCtx {
-    bool replay = false;
+    bool replay = false, shadowOnly = false;
     GLint fbo = 0, program = 0;
 };
 
@@ -802,6 +822,7 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
         const batch::DrawCall draw{static_cast<batch::DrawKind>(dc.kind), dc.mode, dc.count, dc.type, dc.indices, dc.first, dc.instances};
         if (batch::queue({own.smFbo, own.smRes, own.smColumns}, static_cast<GLuint>(ctx.program), draw, uploads.data(), n, mask, sf.maxBatchDraws, sf.twoSided)) {
             ++sf.draws;
+            sf.playerCaster |= ctx.shadowOnly;
             return;
         }
     }
@@ -814,6 +835,9 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
     }
 
     const GLint depthFunc = trackedDepthFunc(st);
+    const bool depthTest = trackedDepthTest(st);
+    const bool depthMask = trackedDepthMask(st);
+    const bool blend = trackedBlend(st);
     const GLboolean scissor = trackedScissor(st);
     GLboolean colorMask[4]{};
     real.GetBooleanv(GL_COLOR_WRITEMASK, colorMask);
@@ -821,6 +845,9 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
     GLfloat depthRange[2]{};
     real.GetFloatv(GL_DEPTH_RANGE, depthRange);
     real.ColorMask(0, 0, 0, 0);
+    if (!depthTest) real.Enable(GL_DEPTH_TEST);
+    if (!depthMask) real.DepthMask(1);
+    if (blend) real.Disable(GL_BLEND);
     real.Disable(GL_STENCIL_TEST);
     if (sf.twoSided) real.Disable(GL_CULL_FACE);
     real.DepthRangef(0.0f, 1.0f);
@@ -844,10 +871,14 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
     setEnabled(GL_CULL_FACE, cullFace);
     real.DepthRangef(depthRange[0], depthRange[1]);
     if (fixDepthFunc) real.DepthFunc(static_cast<GLenum>(depthFunc));
+    if (blend) real.Enable(GL_BLEND);
+    if (!depthMask) real.DepthMask(0);
+    if (!depthTest) real.Disable(GL_DEPTH_TEST);
     if (scissor) real.Enable(GL_SCISSOR_TEST);
     real.Viewport(sf.viewport[0], sf.viewport[1], sf.viewport[2], sf.viewport[3]);
     real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(ctx.fbo));
     ++sf.draws;
+    sf.playerCaster |= ctx.shadowOnly;
 
     if (checking) {
         const GLenum error = real.GetError();
@@ -1054,6 +1085,7 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
     st.skips = 0;
 }
 
+
 void resetSceneAlpha(GLuint sceneFbo) {
     Saved saved{};
     save(saved);
@@ -1094,7 +1126,9 @@ void runHandPass(State& st) {
     real.Uniform1i(own.hShadow, kShadowUnit);
     const int kh = sf.cascades == 2 ? 0 : 1;
     real.UniformMatrix4fv(own.hLightVP, 1, 0, sf.lightVP[kh].data());
-    real.Uniform4f(own.hCam, sf.center[0], sf.center[1], sf.center[2], c.reversedDepth.load() ? 1.0f : 0.0f);
+    const float playerOffset = sf.playerCaster ? 0.6f : 0.0f;
+    real.Uniform4f(own.hCam, sf.center[0] + sf.sun[0] * playerOffset, sf.center[1] + sf.sun[1] * playerOffset,
+                  sf.center[2] + sf.sun[2] * playerOffset, c.reversedDepth.load() ? 1.0f : 0.0f);
     real.Uniform4f(own.hSun, sf.sun[0], sf.sun[1], sf.sun[2], c.strength.load() * sf.strength);
     real.Uniform4f(own.hSm, sf.texel[kh], sf.range[kh], 0.0f, 0.0f);
     real.Uniform4f(own.hMisc, 1.0f / static_cast<float>(own.smRes * own.smColumns), 1.0f / static_cast<float>(own.smRes), static_cast<float>(kh), 0.0f);
@@ -1178,6 +1212,9 @@ void watchdogStuckFrame(State& st) {
     endFrame(st);
 }
 
+
+
+
 void updateLightMode(State& st) {
     const GLint program = trackedProgram(st);
     if (program <= 0) return;
@@ -1202,6 +1239,7 @@ void updateLightMode(State& st) {
         st.alphaForced = true;
     }
 }
+
 
 void updateSunMoon(State& st) {
     const GLint program = trackedProgram(st);
@@ -1239,15 +1277,18 @@ DrawCtx onDraw() {
     watchdogStuckFrame(st);
     ++st.totalDraws;
     ++st.frameDraws;
-    if (gSunPatched.load(std::memory_order_relaxed) > 0) updateSunMoon(st);
-    if (gLightPatched.load(std::memory_order_relaxed) > 0) updateLightMode(st);
+    ctx.shadowOnly = casterScissor(st);
+    if (!ctx.shadowOnly) {
+        if (gSunPatched.load(std::memory_order_relaxed) > 0) updateSunMoon(st);
+        if (gLightPatched.load(std::memory_order_relaxed) > 0) updateLightMode(st);
+    }
     const bool depthTest = trackedDepthTest(st);
     GLint fbo = -1, program = 0;
     auto drawFbo = [&] {
         if (fbo < 0) fbo = trackedFbo(st);
         return fbo;
     };
-    if (st.handPhase && !st.handDone && st.scene.valid && static_cast<GLuint>(drawFbo()) == st.scene.fbo) {
+    if (!ctx.shadowOnly && st.handPhase && !st.handDone && st.scene.valid && static_cast<GLuint>(drawFbo()) == st.scene.fbo) {
         if (depthTest) {
             ++st.handDraws;
         } else if (st.handDraws > 0) {
@@ -1256,12 +1297,21 @@ DrawCtx onDraw() {
             runHandPass(st);
         }
     }
-    if (!depthTest) return ctx;
-    ++st.depthDraws;
+    if (!depthTest && !ctx.shadowOnly) return ctx;
+    if (depthTest) ++st.depthDraws;
 
     if (st.opaqueFrozen || (st.shadowedThisFrame && !st.earlyThisFrame) || !shadowModeActive(st)) return ctx;
     program = trackedProgram(st);
     if (program == 0) return ctx;
+    if (ctx.shadowOnly) {
+        if (st.sf.fbo < 0) st.sf.fbo = drawFbo();
+        if (drawFbo() == st.sf.fbo && !st.shadowedThisFrame) {
+            ctx.replay = true;
+            ctx.fbo = fbo;
+            ctx.program = program;
+        }
+        return ctx;
+    }
     const bool depthMask = trackedDepthMask(st);
     const bool blend = trackedBlend(st);
     if (depthMask && !blend) {
@@ -1274,9 +1324,9 @@ DrawCtx onDraw() {
                 ctx.program = program;
             }
         }
-    } else if (blend && config().beforeBlend.load() && !st.earlyDisabled && !st.shadowedThisFrame && st.sf.ok && st.sf.draws > 0 &&
+    } else if (!ctx.shadowOnly && blend && config().beforeBlend.load() && !st.earlyDisabled && !st.shadowedThisFrame && st.sf.ok && st.sf.draws > 0 &&
                st.prevOpaqueSeen >= 30 && st.opaqueSeen * 100 >= st.prevOpaqueSeen * (st.prevEarly ? 75u : 90u) && drawFbo() == st.sf.fbo &&
-               canShow(st)) {
+               !player::casterExpected() && !st.sf.expectPlayer && canShow(st)) {
         st.earlyThisFrame = true;
         st.opaqueAtTrigger = st.opaqueSeen;
         triggerShadowPass(st, static_cast<GLuint>(fbo));
@@ -1355,12 +1405,30 @@ void useProgramDetour(GLuint program) {
     resolve(kUseProgram, real.UseProgram)(program);
 }
 
+void scissorDetour(GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (player::hooksActive() && x == player::kCasterScissorX &&
+        width == player::kCasterScissorSize && height == player::kCasterScissorSize) {
+        width = 0;
+        height = 0;
+    }
+    if (width >= 0 && height >= 0) {
+        auto& tracked = state().tr;
+        tracked.scissorBox[0] = x;
+        tracked.scissorBox[1] = y;
+        tracked.scissorBox[2] = width;
+        tracked.scissorBox[3] = height;
+        tracked.scissorBoxKnown = true;
+    }
+    resolve(kScissor, real.Scissor)(x, y, width, height);
+}
+
 void colorMaskDetour(GLboolean r, GLboolean gr, GLboolean b, GLboolean a) {
     State& st = state();
     st.tr.mask[0] = r; st.tr.mask[1] = gr; st.tr.mask[2] = b; st.tr.mask[3] = a;
     st.tr.maskKnown = true;
     resolve(kColorMask, real.ColorMask)(r, gr, b, a);
 }
+
 
 void shaderSourceDetour(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
     auto original = resolve(kShaderSource, real.ShaderSource);
@@ -1406,25 +1474,25 @@ void clearDetour(GLbitfield mask) {
 
 void drawElementsDetour(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     const DrawCtx ctx = onDraw();
-    resolve(kDrawElements, real.DrawElements)(mode, count, type, indices);
+    if (!ctx.shadowOnly) resolve(kDrawElements, real.DrawElements)(mode, count, type, indices);
     if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::Elements, mode, count, type, indices, 0, 1});
 }
 void drawArraysDetour(GLenum mode, GLint first, GLsizei count) {
     const DrawCtx ctx = onDraw();
-    resolve(kDrawArrays, real.DrawArrays)(mode, first, count);
+    if (!ctx.shadowOnly) resolve(kDrawArrays, real.DrawArrays)(mode, first, count);
     if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::Arrays, mode, count, 0, nullptr, first, 1});
 }
 void drawElementsInstancedDetour(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instances) {
     const DrawCtx ctx = onDraw();
-    resolve(kDrawElementsInstanced, real.DrawElementsInstanced)(mode, count, type, indices, instances);
+    if (!ctx.shadowOnly) resolve(kDrawElementsInstanced, real.DrawElementsInstanced)(mode, count, type, indices, instances);
     if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::ElementsInstanced, mode, count, type, indices, 0, instances});
 }
 void drawArraysInstancedDetour(GLenum mode, GLint first, GLsizei count, GLsizei instances) {
     const DrawCtx ctx = onDraw();
-    resolve(kDrawArraysInstanced, real.DrawArraysInstanced)(mode, first, count, instances);
+    if (!ctx.shadowOnly) resolve(kDrawArraysInstanced, real.DrawArraysInstanced)(mode, first, count, instances);
     if (state().alphaForced) endForcedAlpha(state());
     if (ctx.replay) shadowReplay(state(), ctx, {DrawKind::ArraysInstanced, mode, count, 0, nullptr, first, instances});
 }
@@ -1508,6 +1576,7 @@ const HookName kHooks[kSlotCount] = {
     {"glUseProgram", reinterpret_cast<void*>(&useProgramDetour)},
     {"glShaderSource", reinterpret_cast<void*>(&shaderSourceDetour)},
     {"glColorMask", reinterpret_cast<void*>(&colorMaskDetour)},
+    {"glScissor", reinterpret_cast<void*>(&scissorDetour)},
 };
 
 using EglGetProcAddressFn = void* (*)(const char*);
@@ -1579,7 +1648,7 @@ bool installGlHooks() {
     LOAD(CreateShader); LOAD(ShaderSource); LOAD(CompileShader); LOAD(GetShaderiv); LOAD(CreateProgram);
     LOAD(AttachShader); LOAD(LinkProgram); LOAD(GetProgramiv); LOAD(DeleteProgram); LOAD(DeleteShader); LOAD(GetUniformLocation);
     LOAD(UseProgram); LOAD(Uniform1i); LOAD(Uniform4f); LOAD(GetIntegerv); LOAD(GetBooleanv); LOAD(IsEnabled); LOAD(Enable);
-    LOAD(Disable); LOAD(Clear); LOAD(UniformMatrix4fv); LOAD(UniformMatrix3fv); LOAD(BlendFuncSeparate); LOAD(BlendEquationSeparate); LOAD(DrawBuffers); LOAD(DepthMask); LOAD(ColorMask); LOAD(Viewport); LOAD(GetError); LOAD(BindSampler);
+    LOAD(Disable); LOAD(Clear); LOAD(UniformMatrix4fv); LOAD(UniformMatrix3fv); LOAD(BlendFuncSeparate); LOAD(BlendEquationSeparate); LOAD(DrawBuffers); LOAD(DepthMask); LOAD(ColorMask); LOAD(Viewport); LOAD(Scissor); LOAD(GetError); LOAD(BindSampler);
     LOAD(GenSamplers); LOAD(SamplerParameteri); LOAD(GetTexLevelParameteriv); LOAD(GetRenderbufferParameteriv); LOAD(BindRenderbuffer); LOAD(GetFramebufferAttachmentParameteriv);
     LOAD(ClearDepthf); LOAD(Uniform1f); LOAD(ClearColor); LOAD(GetString); LOAD(GetFloatv); LOAD(DepthFunc); LOAD(DepthRangef);
 #undef LOAD
@@ -1588,6 +1657,8 @@ bool installGlHooks() {
     batch::setDepthClearObserver(&beforeDepthClear);
 
     gGetCurrentContext = reinterpret_cast<void* (*)()>(::dlsym(RTLD_DEFAULT, "eglGetCurrentContext"));
+
+
 
     auto rollback = [] {
         elf::restoreAll();
@@ -1650,11 +1721,13 @@ bool installGlHooks() {
     }
     gSwapViaGot.store(swapViaGot);
     gActive.store(true);
+    player::setRendererReady(true);
 
     return true;
 }
 
 void removeGlHooks() {
+    player::setRendererReady(false);
     if (!gActive.exchange(false)) return;
     elf::restoreAll();
     if (gEglInlineTarget) {

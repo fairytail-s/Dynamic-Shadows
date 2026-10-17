@@ -1,6 +1,6 @@
 set(CMAKE_SKIP_BUILD_RPATH TRUE)
 cmake_minimum_required(VERSION 3.22)
-project(DynamicShadows VERSION 2.2.2 LANGUAGES CXX)
+project(DynamicShadows VERSION 2.2.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,7 @@ add_library(DynamicShadows SHARED
   src/Menu.cpp
   src/Sun.cpp
   src/GameTime.cpp
+  src/PlayerShadow.cpp
   src/ElfPatch.cpp
   src/GlHooks.cpp
   src/DrawBatch.cpp

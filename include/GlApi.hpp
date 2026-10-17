@@ -30,7 +30,7 @@ constexpr GLenum GL_DEPTH24_STENCIL8 = 0x88F0, GL_DEPTH32F_STENCIL8 = 0x8CAD;
 constexpr GLbitfield GL_DEPTH_BUFFER_BIT = 0x0100, GL_COLOR_BUFFER_BIT = 0x4000;
 constexpr GLenum GL_COLOR_CLEAR_VALUE = 0x0C22, GL_EXTENSIONS = 0x1F03;
 
-constexpr GLenum GL_SCISSOR_TEST = 0x0C11, GL_DEPTH_TEST = 0x0B71, GL_BLEND = 0x0BE2, GL_CULL_FACE = 0x0B44, GL_STENCIL_TEST = 0x0B90;
+constexpr GLenum GL_SCISSOR_BOX = 0x0C10, GL_SCISSOR_TEST = 0x0C11, GL_DEPTH_TEST = 0x0B71, GL_BLEND = 0x0BE2, GL_CULL_FACE = 0x0B44, GL_STENCIL_TEST = 0x0B90;
 constexpr GLenum GL_DITHER = 0x0BD0, GL_RASTERIZER_DISCARD = 0x8C89, GL_DEPTH_WRITEMASK = 0x0B72, GL_COLOR_WRITEMASK = 0x0C23;
 constexpr GLenum GL_VIEWPORT = 0x0BA2, GL_CURRENT_PROGRAM = 0x8B8D, GL_VERTEX_ARRAY_BINDING = 0x85B5;
 
@@ -91,6 +91,7 @@ struct Gl {
     void (*DepthMask)(GLboolean);
     void (*ColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
     void (*Viewport)(GLint, GLint, GLsizei, GLsizei);
+    void (*Scissor)(GLint, GLint, GLsizei, GLsizei);
     GLenum (*GetError)();
     void (*BindSampler)(GLuint, GLuint);
     void (*GenSamplers)(GLsizei, GLuint*);
