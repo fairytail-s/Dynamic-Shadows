@@ -39,8 +39,8 @@ std::atomic<void*> gSwapOrig{nullptr};
 std::atomic<void*> gEglOrig{nullptr};
 std::atomic_bool gActive{false};
 bool gBatchAvailable = false;
-std::atomic<unsigned> gSunPatched{0};    // sun / moon vertex shaders rewritten (visible sun follows the shadow direction)
-std::atomic<unsigned> gLightPatched{0};  // fragment shaders rewritten for the light source fade (blocks + entities)
+std::atomic<unsigned> gSunPatched{0};
+std::atomic<unsigned> gLightPatched{0};
 
 std::atomic_bool gSwapViaGot{false};
 std::atomic_bool gSwapFallbackTried{false};
@@ -78,8 +78,8 @@ struct Own {
     bool smFailed = false;
     unsigned smGen = 0;
     GLint smDepth = -1, smShadow = -1, smInvVP = -1, smLightVP0 = -1, smLightVP1 = -1, smCam = -1, smSun = -1, smSm0 = -1, smSm1 = -1, smMisc = -1, smTint = -1, smFilterUniform = -1, smAtlas = -1, smTuning = -1, smDepthRect = -1, smLight = -1;
-    bool smFetch = false;       // the world pass reads the scene alpha (block light) with framebuffer fetch
-    bool fetchFailed = false;   // framebuffer fetch is not usable: no light source fade
+    bool smFetch = false;
+    bool fetchFailed = false;
 
     GLuint handProgram = 0;
     bool handFailed = false;
@@ -95,10 +95,10 @@ struct SceneInfo {
 struct ProgInfo {
     unsigned generation = 0;
     GLint view = -1, proj = -1, viewProj = -1, modelView = -1, modelViewProj = -1;
-    GLint light = -1;           // uShadowLight, only in fragment shaders ShaderPatch rewrote
-    float lightVal[2] = {-1.0f, -1.0f};  // last values uploaded to it (light fade strength, fog fade strength)
-    GLint sunDelta = -1, sunTex = -1;    // uShadowSunDelta (vertex shaders ShaderPatch rewrote) / s_SunMoonTexture (the real sun + moon program)
-    float sunVal[9] = {};                // last matrix uploaded to sunDelta
+    GLint light = -1;
+    float lightVal[2] = {-1.0f, -1.0f};
+    GLint sunDelta = -1, sunTex = -1;
+    float sunVal[9] = {};
     bool sunKnown = false;
     Mat4 vView{}, vProj{}, vVP{}, vMV{}, vMVP{};
     bool hView = false, hProj = false, hVP = false, hMV = false, hMVP = false;
@@ -141,14 +141,14 @@ struct State {
     struct Tracked {
         GLint fbo = -1, program = -1, depthFunc = -1;
         signed char depthTest = -1, blend = -1, scissor = -1, depthMask = -1;
-        GLboolean mask[4]{1, 1, 1, 1};  // glColorMask
+        GLboolean mask[4]{1, 1, 1, 1};
         bool maskKnown = false;
         bool bad = false;
     } tr;
     GLuint cachedProg = 0;
     ProgInfo* cachedInfo = nullptr;
     bool shadowedThisFrame = false;
-    bool alphaForced = false;  // this draw runs with alpha writes switched on by us (see updateLightMode)
+    bool alphaForced = false;
 
     unsigned opaqueSeen = 0, prevOpaqueSeen = 0;
     unsigned opaqueAtTrigger = 0;
@@ -420,7 +420,7 @@ GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool casc
     };
     const std::string vertex = specialize(kVertexShader);
     std::string fragment = specialize(kFragmentCommon) + fragmentBody;
-    if (fetch) {  // the #extension line has to come right after #version
+    if (fetch) {
         fragment.insert(fragment.find('\n') + 1, "#extension GL_EXT_shader_framebuffer_fetch : require\n#define FB_FETCH 1\n");
     }
     const GLuint vs = real.CreateShader(GL_VERTEX_SHADER);
@@ -443,7 +443,6 @@ GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool casc
     return program;
 }
 
-// GL_EXT_shader_framebuffer_fetch: the world pass reads the scene's alpha (the block light) straight from the framebuffer, no copy needed.
 bool hasFramebufferFetch() {
     static const bool has = [] {
         const char* ext = real.GetString ? reinterpret_cast<const char*>(real.GetString(GL_EXTENSIONS)) : nullptr;
@@ -1055,7 +1054,6 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
     st.skips = 0;
 }
 
-// The rewritten game shaders write 1 - block light into the scene's alpha. Put alpha back to 1 (alpha-only clear) so the screen never sees it.
 void resetSceneAlpha(GLuint sceneFbo) {
     Saved saved{};
     save(saved);
@@ -1180,9 +1178,6 @@ void watchdogStuckFrame(State& st) {
     endFrame(st);
 }
 
-// The rewritten fragment shaders write 1 - block light into alpha only while uShadowLight is 1: opaque draws (blended draws use alpha as
-// opacity) before this frame's shadow pass (the pass puts alpha back to 1, so nothing drawn after it may write it). Some game materials
-// draw with alpha writes switched off (DisableAlphaWrite): for those draws the alpha mask is switched on and put back after the draw.
 void updateLightMode(State& st) {
     const GLint program = trackedProgram(st);
     if (program <= 0) return;
@@ -1207,8 +1202,7 @@ void updateLightMode(State& st) {
         st.alphaForced = true;
     }
 }
-// The sun / moon quad is drawn by the game's own program; its (rewritten) vertex shader moves the quad by uShadowSunDelta. Programs that merely
-// share the vertex shader (no sun / moon sampler) always get zero. Uniforms keep their value between draws, so only changes are uploaded.
+
 void updateSunMoon(State& st) {
     const GLint program = trackedProgram(st);
     if (program <= 0) return;
@@ -1368,7 +1362,6 @@ void colorMaskDetour(GLboolean r, GLboolean gr, GLboolean b, GLboolean a) {
     resolve(kColorMask, real.ColorMask)(r, gr, b, a);
 }
 
-// glShaderSource: rewrite the render-chunk and actor fragment shaders (see ShaderPatch.cpp) before the game compiles them.
 void shaderSourceDetour(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
     auto original = resolve(kShaderSource, real.ShaderSource);
     if (count > 0 && string && gActive.load(std::memory_order_relaxed)) {
@@ -1596,8 +1589,6 @@ bool installGlHooks() {
 
     gGetCurrentContext = reinterpret_cast<void* (*)()>(::dlsym(RTLD_DEFAULT, "eglGetCurrentContext"));
 
-    // Anything patched below is undone if the install does not complete: otherwise the game's import slots keep pointing at our
-    // detours while gActive is false, and removeGlHooks() (which returns early when inactive) would never restore them.
     auto rollback = [] {
         elf::restoreAll();
         if (gEglInlineTarget) {

@@ -87,7 +87,7 @@ RuntimeConfig& config();
 void resetConfigDefaults();
 void applyQualityPreset(int preset);
 void touchConfig();
-// Called (from the config worker thread) after the config file was edited from outside the game and the new values are live.
+
 void setConfigReloadedCallback(void (*callback)());
 bool loadConfigFromDisk();
 void startConfigAutosave();

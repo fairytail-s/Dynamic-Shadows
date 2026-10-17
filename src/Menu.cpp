@@ -224,18 +224,11 @@ void scheduleSchemaRefresh(Refresh kind) {
     gRefreshCv.notify_one();
 }
 
-// While the menu is open the launcher keeps its own copy of every value and evaluates visible_when / enabled_when from it, so a plain toggle or
-// slider change does not need an immediate schema push (a push is only noticed by the launcher's 900 ms poll and then re-applies the whole page,
-// which is what made the menu lag). But the launcher builds the menu the next time it opens from the LAST PUSHED schema, so that schema must still
-// catch up: plain changes push once after 1.2 s without further changes (the values are then identical to what the open menu already shows).
-// Presets, Reset and snapped values change values the launcher cannot know about, so those push right away. Pushing from inside the callback is the
-// path the launcher applies on the very next UI turn; set this to false to go back to the background worker (slower, picked up by the poll).
 constexpr bool kPushSchemaInCallback = true;
 
 void pushChangedValues() {
     {
-        // Plain changes no longer push, so the last pushed JSON can equal the state we are about to push while the launcher shows something
-        // else (the user moved a slider, then pressed Reset). Never skip these pushes as duplicates.
+
         std::lock_guard<std::mutex> push(gPushMutex);
         gLastPushed.clear();
     }
@@ -278,7 +271,7 @@ void handleConfigChanged(std::string_view key, std::string_view value) {
         if (setting.value == &RuntimeConfig::depthBits) result = result < 20 ? 16 : 24;
         (c.*setting.value).store(result);
         touchConfig();
-        if (result != requested) pushChangedValues();  // the slider shows what the user asked for; tell the launcher the value it snapped to
+        if (result != requested) pushChangedValues();
         else scheduleSchemaRefresh(Refresh::Idle);
         return;
     }
@@ -299,7 +292,7 @@ void notifyConfigReloaded() {
     if (!gRegistered.load()) return;
     {
         std::lock_guard<std::mutex> push(gPushMutex);
-        gLastPushed.clear();  // the launcher must get these values even if the JSON equals the last push
+        gLastPushed.clear();
     }
     scheduleSchemaRefresh(Refresh::Quick);
     pl::modmenu::setModuleEnabled(kModule, config().enabled.load());

@@ -26,10 +26,10 @@ namespace shadow {
 namespace {
 constexpr std::size_t kMaxConfigBytes = 64 * 1024;
 constexpr auto kDebounce = std::chrono::milliseconds(250);
-constexpr auto kPoll = std::chrono::milliseconds(400);  // how often the config file is checked for edits made outside the game
+constexpr auto kPoll = std::chrono::milliseconds(400);
 constexpr const char* kModDirName = "DynamicShadows";
 
-void (*gReloaded)() = nullptr;  // told when the file was changed from outside and the new values are live
+void (*gReloaded)() = nullptr;
 
 std::mutex gMutex;
 std::condition_variable gCv;
@@ -45,7 +45,6 @@ bool makeDir(const std::string& path) {
     return errno == EEXIST;
 }
 
-// mkdir -p. Parents we are not allowed to create (e.g. /storage) are skipped; only the final directory has to exist.
 bool makeDirs(const std::string& path) {
     if (path.empty()) return false;
     std::string current;
@@ -72,9 +71,6 @@ std::string siblingConfigPath() {
     return slash == std::string::npos ? std::string{} : self.substr(0, slash + 1) + "config.json";
 }
 
-// The launcher copies a mod's package into <app>/cache/mods/<mod id>/ and loads the library from there; that copy has no config folder.
-// The real mod folder (<mods dir>/<mod id>/config, the one the launcher's config editor lists) is known to the launcher's ModManager, so ask it.
-// Returns an empty string when that is not possible (no JVM / thread not attached / class not found); nothing here may throw or crash.
 std::string jstr(JNIEnv* env, jobject value) {
     if (!value) return {};
     const char* chars = env->GetStringUTFChars(static_cast<jstring>(value), nullptr);
@@ -93,7 +89,7 @@ std::string launcherConfigDir(const std::string& modId) {
     jsize count = 0;
     if (getVms(&vm, 1, &count) != JNI_OK || count < 1 || !vm) return {};
     JNIEnv* env = nullptr;
-    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) return {};  // never attach a thread just for this
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) return {};
     if (env->PushLocalFrame(48) != 0) {
         env->ExceptionClear();
         return {};
@@ -151,7 +147,6 @@ std::string launcherConfigDir(const std::string& modId) {
     return result.empty() || result.front() != '/' ? std::string{} : result;
 }
 
-// <app>/files/native_mod_configs/<name>/config.json: where earlier versions kept the config (private to the app, not visible to the launcher).
 std::string appPrivateConfigPath(const char* name) {
     const std::string self = selfLibraryPath();
     const auto cachePos = self.find("/cache/");
@@ -169,7 +164,6 @@ std::string discoverConfigPath() {
     const std::string self = selfLibraryPath();
     if (self.empty()) return {};
 
-    // Preferred: <mod folder>/config/config.json, the file the launcher's config editor shows.
     const auto slash = self.find_last_of('/');
     if (slash != std::string::npos && slash > 0) {
         const auto parentSlash = self.find_last_of('/', slash - 1);
@@ -178,7 +172,6 @@ std::string discoverConfigPath() {
         if (!dir.empty() && makeDirs(dir)) return dir + "/config.json";
     }
 
-    // The launcher could not be asked: keep working from the app-private folder (and move to the mod folder once it is available).
     const std::string legacy = appPrivateConfigPath(kModDirName);
     if (!legacy.empty()) {
         const auto legacySlash = legacy.find_last_of('/');
@@ -303,8 +296,6 @@ bool applyConfigText(const std::string& text) {
     return true;
 }
 
-// Identity of the config file as last read or written by us. A different stamp means someone else (a text editor, the launcher's config
-// editor) changed it.
 struct FileStamp {
     std::uint64_t ino = 0;
     std::int64_t size = 0, mtimeNs = 0, ctimeNs = 0;
@@ -349,7 +340,7 @@ bool saveConfigToDisk() {
     stream << "\n}\n";
     const std::string json = stream.str();
     const auto slash = path.find_last_of('/');
-    if (slash != std::string::npos && slash > 0) (void)makeDirs(path.substr(0, slash));  // the folder may have been deleted meanwhile
+    if (slash != std::string::npos && slash > 0) (void)makeDirs(path.substr(0, slash));
     const std::string tmp = path + ".tmp";
     const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0660);
     if (fd < 0) return false;
@@ -357,22 +348,20 @@ bool saveConfigToDisk() {
     if (::close(fd) != 0) ok = false;
     if (ok && ::rename(tmp.c_str(), path.c_str()) != 0) ok = false;
     if (!ok) (void)::unlink(tmp.c_str());
-    if (ok) rememberStamp(path);  // our own write is not an outside edit
+    if (ok) rememberStamp(path);
     return ok;
 }
 
-// Called by the worker every kPoll when nothing is waiting to be saved: if the file changed behind our back (edited in a text editor or in
-// the launcher's config editor), load it so the new values apply right away, and tell the menu to show them.
 void pollExternalEdits() {
     const std::string& path = pathStorage();
     if (path.empty()) return;
     FileStamp now;
-    if (!stampOf(path, now)) return;  // missing: an editor may be replacing it, or the user removed it; the next save recreates it
+    if (!stampOf(path, now)) return;
     {
         std::lock_guard<std::mutex> lock(gStampMutex);
         if (gKnownValid && now == gKnownStamp) return;
     }
-    // Only act on a file that stayed the same for two polls, so a half-written file is never read.
+
     static FileStamp pending;
     static bool havePending = false;
     if (!havePending || !(pending == now)) {
@@ -382,14 +371,14 @@ void pollExternalEdits() {
     }
     havePending = false;
     std::string text;
-    if (!readTextFile(path, text)) return;  // empty file (editor truncated it): keep what we have, look again on the next change
+    if (!readTextFile(path, text)) return;
     const bool migrated = applyConfigText(text);
     {
         std::lock_guard<std::mutex> lock(gStampMutex);
         gKnownStamp = now;
         gKnownValid = true;
     }
-    if (migrated) (void)saveConfigToDisk();  // older layout: write it back in the current one
+    if (migrated) (void)saveConfigToDisk();
     if (gReloaded) gReloaded();
 }
 
@@ -469,7 +458,6 @@ bool loadConfigFromDisk() {
         return true;
     }
 
-    // First start with this layout: carry over what earlier versions saved in the app-private folder.
     for (const char* name : {kModDirName, "Shadow"}) {
         const std::string legacy = appPrivateConfigPath(name);
         if (legacy.empty() || legacy == persistent || !readTextFile(legacy, text)) continue;
@@ -485,7 +473,6 @@ bool loadConfigFromDisk() {
         return true;
     }
 
-    // No config anywhere: write the defaults so the file exists (and shows up in the launcher's config editor).
     if (!persistent.empty()) (void)saveConfigToDisk();
     return false;
 }

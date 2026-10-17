@@ -21,7 +21,6 @@ std::size_t findToken(const std::string& s, std::string_view token, std::size_t 
     return std::string::npos;
 }
 
-// Position of the `main` token in "void main(" (npos if there is no such function).
 std::size_t findMainName(const std::string& s) {
     std::size_t p = 0;
     while ((p = s.find("void", p)) != std::string::npos) {
@@ -37,8 +36,6 @@ std::size_t findMainName(const std::string& s) {
     return std::string::npos;
 }
 
-// The colour output expression: gl_FragColor (GLSL ES 1.00), or the first `out vec4 name;` / `out vec4 name[N];` of GLSL ES 3.00
-// (an array output is written as name[0]). Function parameters (`out` after a '(') are not outputs.
 std::string findOutput(const std::string& s) {
     if (findToken(s, "gl_FragColor") != std::string::npos) return "gl_FragColor";
     if (findToken(s, "bgfx_FragData") != std::string::npos && s.find("bgfx_FragData[") != std::string::npos) return "bgfx_FragData[0]";
@@ -62,9 +59,6 @@ std::string findOutput(const std::string& s) {
     return {};
 }
 
-// The vertex shader of the sun / moon quad: u_model[0] puts the quad in the sky (v_worldPos), u_viewProj projects it. Only this exact shape is
-// rewritten (all the attributes below, none of the chunk / actor ones, and the final `gl_Position = u_viewProj * vec4(<name>.xyz, 1.0);`),
-// so any other shader is left untouched. The world position is moved by uShadowSunDelta right before the projection.
 bool patchSunMoonVertex(std::string& src, std::size_t mainName) {
     for (std::string_view t : {"a_position", "a_texcoord0", "a_color0", "v_worldPos", "u_viewProj", "u_model"})
         if (findToken(src, t) == std::string::npos) return false;
@@ -77,8 +71,8 @@ bool patchSunMoonVertex(std::string& src, std::size_t mainName) {
     if (!std::regex_search(src, m, statement)) return false;
     const std::size_t begin = static_cast<std::size_t>(m.position(0));
     const std::size_t nameBegin = static_cast<std::size_t>(m.position(1));
-    // The matched name must be a plain local: wrap its `.xyz` in our function.
-    const std::size_t nameEnd = nameBegin + static_cast<std::size_t>(m.length(1)) + 4;  // name + ".xyz"
+
+    const std::size_t nameEnd = nameBegin + static_cast<std::size_t>(m.length(1)) + 4;
     if (nameBegin < begin || nameEnd > src.size()) return false;
     const std::string expr = src.substr(nameBegin, nameEnd - nameBegin);
     src.replace(nameBegin, nameEnd - nameBegin, "shadowSunMove(" + expr + ")");
@@ -89,12 +83,10 @@ bool patchSunMoonVertex(std::string& src, std::size_t mainName) {
     return true;
 }
 
-}  // namespace
+}
 
-// Block light of a render-chunk vertex, computed exactly like the game's vertex shader does (x = block light, y = sky light). It is
-// recomputed from the raw vertex attribute so it keeps working when a modified material renames or drops v_lightmapUV.
 constexpr const char* kChunkLightVarying = "vShadowLightUV";
-constexpr const char* kLightFadeStart = "0.35";  // block light where the fade starts / is complete
+constexpr const char* kLightFadeStart = "0.35";
 constexpr const char* kLightFadeEnd = "0.9";
 constexpr const char* kChunkLightExpr = "fract(a_texcoord1.y*vec2(256.0, 4096.0))";
 
@@ -103,7 +95,6 @@ LightPatch patchLightShader(std::string& src) {
     if (mainName == std::string::npos) return LightPatch::None;
     const bool es3 = src.find("#version 3") != std::string::npos;
 
-    // Vertex stage of the blocks: pass the block light on in our own varying.
     if (findToken(src, "gl_Position") != std::string::npos) {
         if (patchSunMoonVertex(src, mainName)) return LightPatch::SunMoon;
         if (findToken(src, "a_texcoord1") == std::string::npos || findToken(src, kChunkLightVarying) != std::string::npos) return LightPatch::None;
@@ -120,12 +111,14 @@ LightPatch patchLightShader(std::string& src) {
 
     if (src.find(kLightUniform) != std::string::npos) return LightPatch::None;
 
-    // Blocks: the lightmap sampler marks the render-chunk fragment shader; the light comes from our varying (see above).
-    // Entities: TileLightIntensity.r / .g hold the block / sky light the same way the lightmap UV does (per draw, not per vertex).
     LightPatch kind = LightPatch::None;
     std::string blockLight;
     std::string decl;
-    if (findToken(src, "s_LightMapTexture") != std::string::npos) {
+
+    const bool packChunk = findToken(src, "s_LightMapTexture") == std::string::npos && findToken(src, "s_MatTexture") != std::string::npos &&
+                           findToken(src, "v_fog") != std::string::npos && findToken(src, "v_color0") != std::string::npos &&
+                           findToken(src, "v_extra") != std::string::npos && findToken(src, "v_refl") != std::string::npos;
+    if (findToken(src, "s_LightMapTexture") != std::string::npos || packChunk) {
         kind = LightPatch::Chunk;
         blockLight = std::string("clamp(") + kChunkLightVarying + ".x, 0.0, 1.0)";
         decl = std::string(es3 ? "\nin mediump vec2 " : "\nvarying mediump vec2 ") + kChunkLightVarying + ";";
@@ -139,7 +132,7 @@ LightPatch patchLightShader(std::string& src) {
     }
     const std::string out = findOutput(src);
     if (out.empty()) return LightPatch::None;
-    // Fog amount: v_fog.a is the weight the game mixes its fog colour in with (blocks and entities both have it).
+
     const std::string fog = findToken(src, "v_fog") != std::string::npos ? "clamp(v_fog.a, 0.0, 1.0)" : "0.0";
     const std::string alpha = std::string("(1.0 - ") + kLightUniform + ".x * smoothstep(" + kLightFadeStart + ", " + kLightFadeEnd + ", " + blockLight + ")) * (1.0 - " +
                               kLightUniform + ".y * " + fog + ")";
@@ -157,4 +150,4 @@ LightPatch patchLightShader(std::string& src) {
     return kind;
 }
 
-}  // namespace shadow
+}

@@ -17,8 +17,7 @@ namespace shadow {
 namespace {
 constexpr const char* kGetTimeSignature =
     "? ? ? D1 ? ? ? A9 ? ? ? F9 ? ? ? A9 ? ? ? 91 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
-// Same function without its first five instructions. Another mod's inline hook (BedrockTools' Time Changer hooks this very function)
-// overwrites the start of the function, so the full signature above stops matching once it has been installed. The unpatched part still does.
+
 constexpr const char* kGetTimeTailSignature =
     "? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? ? 55 D0 3B D5 ? ? ? F9 ? ? ? F8 ? ? ? F9 ? ? ? F9 00 01 3F D6 ? ? ? F9";
 constexpr const char* kGame = "libminecraftpe.so";
@@ -64,8 +63,7 @@ Attempt tryInstall() {
     }
     const std::uintptr_t address = match.address;
     void* original = nullptr;
-    // Highest priority = outermost hook: the value seen here is the one the game really gets, even when another mod (Time Changer)
-    // replaces the time further down the chain.
+
     if (pl::memory::hook(reinterpret_cast<void*>(address), reinterpret_cast<void*>(&getTimeDetour), &original, pl::memory::HookPriority::Highest) != 0 || !original) {
         return Attempt::HookFailed;
     }
@@ -77,15 +75,13 @@ Attempt tryInstall() {
 }
 
 bool installTimeHook() {
-    // Never scan libminecraftpe.so on the caller's thread: the signature scan walks the whole executable segment (twice on a miss) and
-    // can take seconds on a low-memory phone, which blocks the launcher's loader/UI thread (ANR). The worker tries immediately, then
-    // waits 4 s before its first try, then retries every 2 s (up to 60 times) while the game library is not loaded yet.
+
     if (gActive.load()) return true;
     std::thread stale;
     {
         std::lock_guard<std::mutex> lock(gMutex);
         if (gRetry.joinable()) {
-            // A worker that is still running keeps going; a finished one is reaped so a later enable() can start a new one.
+
             if (!gWorkerDone) return true;
             stale = std::move(gRetry);
         }
@@ -96,14 +92,13 @@ bool installTimeHook() {
     gStopRetry = false;
     gWorkerDone = false;
     gRetry = std::thread([] {
-        // Lower priority so the scan never competes with the launcher's loader / UI thread on slow phones.
+
         (void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::gettid()), 10);
         for (int i = 0; i < 60; ++i) {
             {
                 std::unique_lock<std::mutex> lock(gMutex);
                 if (gStopRetry) break;
-                // First attempt waits kInitialDelay so the launcher's own signature scan (and other mods') finishes first; later
-                // attempts retry every 2 s. Both waits wake immediately on gStopRetry, so disable() still cancels promptly.
+
                 const auto delay = i == 0 ? kInitialDelay : std::chrono::seconds(2);
                 if (gCv.wait_for(lock, delay, [] { return gStopRetry; })) break;
             }

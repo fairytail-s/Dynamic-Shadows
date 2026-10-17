@@ -37,7 +37,7 @@ bool computeSunDelta(const SunParams& p, float delta[9]) {
     for (int i = 0; i < 9; ++i) delta[i] = 0.0f;
     double r[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     if (p.dayCycle && p.timeOfDay >= 0) {
-        // Same two rotations computeSun() applies to the sun path: tilt about X, then yaw about Y.
+
         const double tilt = double(p.tilt) * kDeg, yaw = (double(p.azimuth) - 90.0) * kDeg;
         const double ct = std::cos(tilt), st = std::sin(tilt), cy = std::cos(yaw), sy = std::sin(yaw);
         const double rt[3][3] = {{1, 0, 0}, {0, ct, -st}, {0, st, ct}};
@@ -45,7 +45,7 @@ bool computeSunDelta(const SunParams& p, float delta[9]) {
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 3; ++j) r[i][j] = ry[i][0] * rt[0][j] + ry[i][1] * rt[1][j] + ry[i][2] * rt[2][j];
     } else if (!p.dayCycle && p.timeOfDay >= 0) {
-        // Fixed sun: smallest rotation from where the game draws the sun now to the chosen compass position.
+
         const double theta = double(celestialAngle(p.timeOfDay)) * 2.0 * kPi;
         const double g[3] = {-std::sin(theta), std::cos(theta), 0.0};
         float tf[3];
@@ -54,8 +54,8 @@ bool computeSunDelta(const SunParams& p, float delta[9]) {
         const double v[3] = {g[1] * t[2] - g[2] * t[1], g[2] * t[0] - g[0] * t[2], g[0] * t[1] - g[1] * t[0]};
         const double c = g[0] * t[0] + g[1] * t[1] + g[2] * t[2];
         if (c < -0.999999) {
-            // Opposite directions: half turn about any axis perpendicular to g (R = 2aa^T - I).
-            double a[3] = {0.0, 0.0, 1.0};  // g lies in the XY plane, so Z is perpendicular to it
+
+            double a[3] = {0.0, 0.0, 1.0};
             for (int i = 0; i < 3; ++i)
                 for (int j = 0; j < 3; ++j) r[i][j] = 2.0 * a[i] * a[j] - (i == j ? 1.0 : 0.0);
         } else {
