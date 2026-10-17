@@ -27,6 +27,7 @@ constexpr std::string_view kOwnerModId = "DynamicShadows";
 
 using SetSchemaFn = bool (*)(std::string_view, std::string_view);
 SetSchemaFn gSetSchema{};
+std::atomic_bool gRegistered{false};
 
 std::string fstr(float v) {
     char buf[48]{};
@@ -148,6 +149,7 @@ std::string schemaJson() {
 
 constexpr auto kSliderSettle = std::chrono::milliseconds(400);
 constexpr auto kQuickDelay = std::chrono::milliseconds(30);
+constexpr auto kIdleSettle = std::chrono::milliseconds(1200);
 
 std::mutex gPushMutex;
 std::string gLastPushed;
@@ -211,27 +213,46 @@ void stopRefreshWorker() {
     gRefreshStop = false;
 }
 
-enum class Refresh { Quick, Slider };
+enum class Refresh { Quick, Slider, Idle };
 
 void scheduleSchemaRefresh(Refresh kind) {
     std::lock_guard<std::mutex> lock(gRefreshMutex);
     if (!gRefreshRunning) return;
-    const auto delay = kind == Refresh::Slider ? kSliderSettle : kQuickDelay;
+    const auto delay = kind == Refresh::Slider ? kSliderSettle : kind == Refresh::Idle ? kIdleSettle : kQuickDelay;
     if (delay > gRefreshDelay || gRefreshRequested == gRefreshDone) gRefreshDelay = delay;
     ++gRefreshRequested;
     gRefreshCv.notify_one();
 }
 
+// While the menu is open the launcher keeps its own copy of every value and evaluates visible_when / enabled_when from it, so a plain toggle or
+// slider change does not need an immediate schema push (a push is only noticed by the launcher's 900 ms poll and then re-applies the whole page,
+// which is what made the menu lag). But the launcher builds the menu the next time it opens from the LAST PUSHED schema, so that schema must still
+// catch up: plain changes push once after 1.2 s without further changes (the values are then identical to what the open menu already shows).
+// Presets, Reset and snapped values change values the launcher cannot know about, so those push right away. Pushing from inside the callback is the
+// path the launcher applies on the very next UI turn; set this to false to go back to the background worker (slower, picked up by the poll).
+constexpr bool kPushSchemaInCallback = true;
+
+void pushChangedValues() {
+    {
+        // Plain changes no longer push, so the last pushed JSON can equal the state we are about to push while the launcher shows something
+        // else (the user moved a slider, then pressed Reset). Never skip these pushes as duplicates.
+        std::lock_guard<std::mutex> push(gPushMutex);
+        gLastPushed.clear();
+    }
+    if (kPushSchemaInCallback) refreshSchema();
+    else scheduleSchemaRefresh(Refresh::Quick);
+}
+
 void handleToggle(bool enabled) {
     config().enabled.store(enabled);
     touchConfig();
-    scheduleSchemaRefresh(Refresh::Quick);
+    scheduleSchemaRefresh(Refresh::Idle);
 }
 
 void setBool(std::atomic_bool& target, std::string_view value, bool def) {
     target.store(parseBool(value, def));
     touchConfig();
-    scheduleSchemaRefresh(Refresh::Quick);
+    scheduleSchemaRefresh(Refresh::Idle);
 }
 
 void handleConfigChanged(std::string_view key, std::string_view value) {
@@ -246,30 +267,42 @@ void handleConfigChanged(std::string_view key, std::string_view value) {
         const float scale = displayScale(setting);
         (c.*setting.value).store(parseFloat(value, setting.initial * scale, setting.minimum * scale, setting.maximum * scale) / scale);
         touchConfig();
-        scheduleSchemaRefresh(Refresh::Slider);
+        scheduleSchemaRefresh(Refresh::Idle);
         return;
     }
     for (const auto& setting : kIntSettings) {
         if (key != setting.key) continue;
         const float parsed = parseFloat(value, static_cast<float>(setting.initial), static_cast<float>(setting.minimum), static_cast<float>(setting.maximum));
-        int result = static_cast<int>(std::lround(parsed));
+        const int requested = std::clamp(static_cast<int>(std::lround(parsed)), setting.minimum, setting.maximum);
+        int result = requested;
         if (setting.value == &RuntimeConfig::depthBits) result = result < 20 ? 16 : 24;
-        (c.*setting.value).store(std::clamp(result, setting.minimum, setting.maximum));
+        (c.*setting.value).store(result);
         touchConfig();
-        scheduleSchemaRefresh(Refresh::Slider);
+        if (result != requested) pushChangedValues();  // the slider shows what the user asked for; tell the launcher the value it snapped to
+        else scheduleSchemaRefresh(Refresh::Idle);
         return;
     }
     if (key == "preset_performance" || key == "preset_balanced" || key == "preset_quality" || key == "preset_ultra") {
         applyQualityPreset(key == "preset_performance" ? 0 : key == "preset_balanced" ? 1 : key == "preset_ultra" ? 3 : 2);
         touchConfig();
-        scheduleSchemaRefresh(Refresh::Quick);
+        pushChangedValues();
     }
     else if (key == "reset_defaults") {
         resetConfigDefaults();
         touchConfig();
-        scheduleSchemaRefresh(Refresh::Quick);
+        pushChangedValues();
     }
 }
+}
+
+void notifyConfigReloaded() {
+    if (!gRegistered.load()) return;
+    {
+        std::lock_guard<std::mutex> push(gPushMutex);
+        gLastPushed.clear();  // the launcher must get these values even if the JSON equals the last push
+    }
+    scheduleSchemaRefresh(Refresh::Quick);
+    pl::modmenu::setModuleEnabled(kModule, config().enabled.load());
 }
 
 bool registerMenu() {
@@ -303,11 +336,15 @@ bool registerMenu() {
 
     startRefreshWorker();
     const bool ok = pl::modmenu::registerModule(m);
-    if (ok) refreshSchema();
+    if (ok) {
+        gRegistered.store(true);
+        refreshSchema();
+    }
     return ok;
 }
 
 void unregisterMenu() {
+    gRegistered.store(false);
     stopRefreshWorker();
     pl::modmenu::unregisterModule(kModule);
     gSetSchema = nullptr;

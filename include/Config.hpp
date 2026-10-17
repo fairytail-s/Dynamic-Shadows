@@ -18,7 +18,7 @@ struct RuntimeConfig {
     std::atomic_bool enabled{true}, reversedDepth{false}, debugView{false};
     std::atomic_bool dayCycle{kDefaultDayCycle}, moon{kDefaultMoon}, handShadow{kDefaultHand}, cascades{kDefaultCascades};
     std::atomic_bool beforeBlend{kDefaultBeforeBlend}, cullDraws{kDefaultCull}, batchDraws{true}, directDepth{true};
-    std::atomic_bool twoSided{false}, layoutSnapshots{true};
+    std::atomic_bool twoSided{false}, layoutSnapshots{true}, syncSun{true};
     std::atomic<float> strength{kDefaultStrength}, azimuth{kDefaultAzimuth}, elevation{kDefaultElevation}, tilt{kDefaultTilt};
     std::atomic<int> shadowRes{kDefaultShadowRes}, depthBits{24}, filterQuality{1}, updateInterval{1}, maxBatchDraws{4096};
     std::atomic<float> shadowDist{kDefaultShadowDist}, nearFraction{0.30f}, softness{0.85f}, depthBias{0.85f}, normalBias{0.65f};
@@ -43,6 +43,7 @@ struct IntSetting {
 
 inline constexpr std::array kBoolSettings{
     BoolSetting{"day_cycle", "Follow the day and night", "Move the light with the game time. Turn off to choose a fixed sun position.", "lighting", "light_motion", &RuntimeConfig::dayCycle, true},
+    BoolSetting{"sync_visible_sun", "Move the visible sun and moon", "Make the sun and moon you see in the sky follow the direction set here, so they match the shadows. Applies to shaders compiled after the mod loads; restart the game once after changing it.", "lighting", "light_motion", &RuntimeConfig::syncSun, true},
     BoolSetting{"moon_shadows", "Moon shadows", "Allow softer, weaker shadows at night.", "lighting", "light_motion", &RuntimeConfig::moon, true},
     BoolSetting{"hand_shadow", "Shade hand and held item", "Darken your hand when you stand in shadow. Requires a compatible world and hand target.", "appearance", "shadow_style", &RuntimeConfig::handShadow, true},
     BoolSetting{"shadow_cascades", "Sharper nearby shadows", "Use a second map for close objects. Improves nearby detail and costs more to draw.", "quality", "map_detail", &RuntimeConfig::cascades, true},
@@ -86,6 +87,8 @@ RuntimeConfig& config();
 void resetConfigDefaults();
 void applyQualityPreset(int preset);
 void touchConfig();
+// Called (from the config worker thread) after the config file was edited from outside the game and the new values are live.
+void setConfigReloadedCallback(void (*callback)());
 bool loadConfigFromDisk();
 void startConfigAutosave();
 void stopConfigAutosave();

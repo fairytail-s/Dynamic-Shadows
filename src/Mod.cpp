@@ -8,6 +8,7 @@
 namespace shadow {
 bool ShadowMod::load() {
     (void)loadConfigFromDisk();
+    setConfigReloadedCallback(&notifyConfigReloaded);
     startConfigAutosave();
 
     return true;

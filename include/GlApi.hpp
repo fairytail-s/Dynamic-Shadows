@@ -99,6 +99,7 @@ struct Gl {
     void (*GetRenderbufferParameteriv)(GLenum, GLenum, GLint*);
     void (*Clear)(GLbitfield);
     void (*UniformMatrix4fv)(GLint, GLsizei, GLboolean, const GLfloat*);
+    void (*UniformMatrix3fv)(GLint, GLsizei, GLboolean, const GLfloat*);
     void (*BlendFuncSeparate)(GLenum, GLenum, GLenum, GLenum);
     void (*BlendEquationSeparate)(GLenum, GLenum);
     void (*DrawBuffers)(GLsizei, const GLenum*);

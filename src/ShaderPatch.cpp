@@ -1,6 +1,7 @@
 #include "ShaderPatch.hpp"
 
 #include <cstddef>
+#include <regex>
 #include <string_view>
 
 namespace shadow {
@@ -61,6 +62,33 @@ std::string findOutput(const std::string& s) {
     return {};
 }
 
+// The vertex shader of the sun / moon quad: u_model[0] puts the quad in the sky (v_worldPos), u_viewProj projects it. Only this exact shape is
+// rewritten (all the attributes below, none of the chunk / actor ones, and the final `gl_Position = u_viewProj * vec4(<name>.xyz, 1.0);`),
+// so any other shader is left untouched. The world position is moved by uShadowSunDelta right before the projection.
+bool patchSunMoonVertex(std::string& src, std::size_t mainName) {
+    for (std::string_view t : {"a_position", "a_texcoord0", "a_color0", "v_worldPos", "u_viewProj", "u_model"})
+        if (findToken(src, t) == std::string::npos) return false;
+    for (std::string_view t : {"a_texcoord1", "a_normal", "a_tangent", "a_bitangent", "a_indices", "a_weight", "a_texcoord2"})
+        if (findToken(src, t) != std::string::npos) return false;
+    if (findToken(src, kSunUniform) != std::string::npos) return false;
+
+    static const std::regex statement(R"(gl_Position\s*=\s*u_viewProj\s*\*\s*vec4\(\s*(\w+)\.xyz\s*,\s*1\.0\s*\)\s*;)");
+    std::smatch m;
+    if (!std::regex_search(src, m, statement)) return false;
+    const std::size_t begin = static_cast<std::size_t>(m.position(0));
+    const std::size_t nameBegin = static_cast<std::size_t>(m.position(1));
+    // The matched name must be a plain local: wrap its `.xyz` in our function.
+    const std::size_t nameEnd = nameBegin + static_cast<std::size_t>(m.length(1)) + 4;  // name + ".xyz"
+    if (nameBegin < begin || nameEnd > src.size()) return false;
+    const std::string expr = src.substr(nameBegin, nameEnd - nameBegin);
+    src.replace(nameBegin, nameEnd - nameBegin, "shadowSunMove(" + expr + ")");
+
+    const std::size_t voidPos = src.rfind("void", mainName);
+    if (voidPos == std::string::npos) return false;
+    src.insert(voidPos, std::string("uniform highp mat3 ") + kSunUniform + ";\nvec3 shadowSunMove(vec3 p) { return p + " + kSunUniform + " * p; }\n");
+    return true;
+}
+
 }  // namespace
 
 // Block light of a render-chunk vertex, computed exactly like the game's vertex shader does (x = block light, y = sky light). It is
@@ -77,6 +105,7 @@ LightPatch patchLightShader(std::string& src) {
 
     // Vertex stage of the blocks: pass the block light on in our own varying.
     if (findToken(src, "gl_Position") != std::string::npos) {
+        if (patchSunMoonVertex(src, mainName)) return LightPatch::SunMoon;
         if (findToken(src, "a_texcoord1") == std::string::npos || findToken(src, kChunkLightVarying) != std::string::npos) return LightPatch::None;
         src.replace(mainName, 4, "shadowOrigVertexMain");
         src += es3 ? "\nout vec2 " : "\nvarying vec2 ";

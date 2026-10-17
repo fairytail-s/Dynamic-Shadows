@@ -1,5 +1,5 @@
 set_project("DynamicShadows")
-set_version("2.2.0")
+set_version("2.2.1")
 set_languages("c++20")
 set_allowedplats("android")
 set_allowedarchs("arm64-v8a")

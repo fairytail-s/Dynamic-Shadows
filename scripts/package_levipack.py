@@ -19,7 +19,8 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(args.output, "w", ZIP_DEFLATED, compresslevel=9) as archive:
         archive.write(library, manifest["entry"])
-        for name in ["manifest.json", "config.json", "icon.png"]:
+        # config/config.json is created by the mod on first start (and kept across updates), so it is not packaged.
+        for name in ["manifest.json", "icon.png"]:
             archive.write(root / name, name)
     print(args.output.resolve())
 

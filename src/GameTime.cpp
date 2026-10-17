@@ -40,6 +40,7 @@ std::mutex gMutex;
 std::condition_variable gCv;
 std::thread gRetry;
 bool gStopRetry = false;
+bool gWorkerDone = true;
 
 bool gameLoaded() {
     void* handle = ::dlopen(kGame, RTLD_NOW | RTLD_NOLOAD);
@@ -73,25 +74,37 @@ Attempt tryInstall() {
 }
 
 bool installTimeHook() {
-    const Attempt first = tryInstall();
-    if (first == Attempt::NotLoaded) {
+    // Never scan libminecraftpe.so on the caller's thread: the signature scan walks the whole executable segment (twice on a miss) and
+    // can take seconds on a low-memory phone, which blocks the launcher's loader/UI thread (ANR). The worker tries immediately, then
+    // retries every 2 s (up to 60 times) while the game library is not loaded yet.
+    if (gActive.load()) return true;
+    std::thread stale;
+    {
         std::lock_guard<std::mutex> lock(gMutex);
-        if (!gRetry.joinable()) {
-            gStopRetry = false;
-            gRetry = std::thread([] {
-                std::unique_lock<std::mutex> lock(gMutex);
-                for (int i = 0; i < 60 && !gStopRetry; ++i) {
-                    if (gCv.wait_for(lock, std::chrono::seconds(2), [] { return gStopRetry; })) break;
-                    lock.unlock();
-                    const Attempt a = tryInstall();
-                    lock.lock();
-                    if (a == Attempt::NotLoaded) continue;
-                    break;
-                }
-            });
+        if (gRetry.joinable()) {
+            // A worker that is still running keeps going; a finished one is reaped so a later enable() can start a new one.
+            if (!gWorkerDone) return true;
+            stale = std::move(gRetry);
         }
     }
-    return first == Attempt::Installed;
+    if (stale.joinable()) stale.join();
+    std::lock_guard<std::mutex> lock(gMutex);
+    if (gRetry.joinable()) return true;
+    gStopRetry = false;
+    gWorkerDone = false;
+    gRetry = std::thread([] {
+        for (int i = 0; i < 60; ++i) {
+            {
+                std::unique_lock<std::mutex> lock(gMutex);
+                if (gStopRetry) break;
+                if (i > 0 && gCv.wait_for(lock, std::chrono::seconds(2), [] { return gStopRetry; })) break;
+            }
+            if (tryInstall() != Attempt::NotLoaded) break;
+        }
+        std::lock_guard<std::mutex> lock(gMutex);
+        gWorkerDone = true;
+    });
+    return true;
 }
 
 void removeTimeHook() {

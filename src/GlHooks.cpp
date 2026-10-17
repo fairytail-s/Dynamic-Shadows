@@ -39,6 +39,7 @@ std::atomic<void*> gSwapOrig{nullptr};
 std::atomic<void*> gEglOrig{nullptr};
 std::atomic_bool gActive{false};
 bool gBatchAvailable = false;
+std::atomic<unsigned> gSunPatched{0};    // sun / moon vertex shaders rewritten (visible sun follows the shadow direction)
 std::atomic<unsigned> gLightPatched{0};  // fragment shaders rewritten for the light source fade (blocks + entities)
 
 std::atomic_bool gSwapViaGot{false};
@@ -96,6 +97,9 @@ struct ProgInfo {
     GLint view = -1, proj = -1, viewProj = -1, modelView = -1, modelViewProj = -1;
     GLint light = -1;           // uShadowLight, only in fragment shaders ShaderPatch rewrote
     float lightVal[2] = {-1.0f, -1.0f};  // last values uploaded to it (light fade strength, fog fade strength)
+    GLint sunDelta = -1, sunTex = -1;    // uShadowSunDelta (vertex shaders ShaderPatch rewrote) / s_SunMoonTexture (the real sun + moon program)
+    float sunVal[9] = {};                // last matrix uploaded to sunDelta
+    bool sunKnown = false;
     Mat4 vView{}, vProj{}, vVP{}, vMV{}, vMVP{};
     bool hView = false, hProj = false, hVP = false, hMV = false, hMVP = false;
 };
@@ -237,6 +241,10 @@ ProgInfo& progInfo(State& st, GLuint program) {
     pi.modelView = real.GetUniformLocation(program, "u_modelView");
     pi.modelViewProj = real.GetUniformLocation(program, "u_modelViewProj");
     pi.light = real.GetUniformLocation(program, kLightUniform);
+    if (gSunPatched.load(std::memory_order_relaxed) > 0) {
+        pi.sunDelta = real.GetUniformLocation(program, kSunUniform);
+        if (pi.sunDelta >= 0) pi.sunTex = real.GetUniformLocation(program, kSunTexture);
+    }
     ProgInfo& stored = st.progs.emplace(program, pi).first->second;
     st.cachedProg = program;
     st.cachedInfo = &stored;
@@ -1199,6 +1207,29 @@ void updateLightMode(State& st) {
         st.alphaForced = true;
     }
 }
+// The sun / moon quad is drawn by the game's own program; its (rewritten) vertex shader moves the quad by uShadowSunDelta. Programs that merely
+// share the vertex shader (no sun / moon sampler) always get zero. Uniforms keep their value between draws, so only changes are uploaded.
+void updateSunMoon(State& st) {
+    const GLint program = trackedProgram(st);
+    if (program <= 0) return;
+    ProgInfo& pi = progInfo(st, static_cast<GLuint>(program));
+    if (pi.sunDelta < 0) return;
+    float delta[9] = {};
+    const auto& c = config();
+    if (pi.sunTex >= 0 && c.enabled.load() && c.syncSun.load()) {
+        SunParams sp;
+        sp.dayCycle = c.dayCycle.load();
+        sp.timeOfDay = currentGameTime();
+        sp.azimuth = c.azimuth.load();
+        sp.elevation = c.elevation.load();
+        sp.tilt = c.tilt.load();
+        (void)computeSunDelta(sp, delta);
+    }
+    if (pi.sunKnown && std::memcmp(delta, pi.sunVal, sizeof delta) == 0) return;
+    real.UniformMatrix3fv(pi.sunDelta, 1, 0, delta);
+    std::memcpy(pi.sunVal, delta, sizeof delta);
+    pi.sunKnown = true;
+}
 void endForcedAlpha(State& st) {
     real.ColorMask(st.tr.mask[0], st.tr.mask[1], st.tr.mask[2], st.tr.mask[3]);
     st.alphaForced = false;
@@ -1214,6 +1245,7 @@ DrawCtx onDraw() {
     watchdogStuckFrame(st);
     ++st.totalDraws;
     ++st.frameDraws;
+    if (gSunPatched.load(std::memory_order_relaxed) > 0) updateSunMoon(st);
     if (gLightPatched.load(std::memory_order_relaxed) > 0) updateLightMode(st);
     const bool depthTest = trackedDepthTest(st);
     GLint fbo = -1, program = 0;
@@ -1347,7 +1379,8 @@ void shaderSourceDetour(GLuint shader, GLsizei count, const GLchar* const* strin
             else source.append(string[i]);
         }
         const LightPatch kind = patchLightShader(source);
-        if (kind == LightPatch::ChunkVertex) {
+        if (kind == LightPatch::SunMoon) gSunPatched.fetch_add(1, std::memory_order_relaxed);
+        if (kind == LightPatch::ChunkVertex || kind == LightPatch::SunMoon) {
             const char* p = source.c_str();
             original(shader, 1, &p, nullptr);
             return;
@@ -1553,7 +1586,7 @@ bool installGlHooks() {
     LOAD(CreateShader); LOAD(ShaderSource); LOAD(CompileShader); LOAD(GetShaderiv); LOAD(CreateProgram);
     LOAD(AttachShader); LOAD(LinkProgram); LOAD(GetProgramiv); LOAD(DeleteProgram); LOAD(DeleteShader); LOAD(GetUniformLocation);
     LOAD(UseProgram); LOAD(Uniform1i); LOAD(Uniform4f); LOAD(GetIntegerv); LOAD(GetBooleanv); LOAD(IsEnabled); LOAD(Enable);
-    LOAD(Disable); LOAD(Clear); LOAD(UniformMatrix4fv); LOAD(BlendFuncSeparate); LOAD(BlendEquationSeparate); LOAD(DrawBuffers); LOAD(DepthMask); LOAD(ColorMask); LOAD(Viewport); LOAD(GetError); LOAD(BindSampler);
+    LOAD(Disable); LOAD(Clear); LOAD(UniformMatrix4fv); LOAD(UniformMatrix3fv); LOAD(BlendFuncSeparate); LOAD(BlendEquationSeparate); LOAD(DrawBuffers); LOAD(DepthMask); LOAD(ColorMask); LOAD(Viewport); LOAD(GetError); LOAD(BindSampler);
     LOAD(GenSamplers); LOAD(SamplerParameteri); LOAD(GetTexLevelParameteriv); LOAD(GetRenderbufferParameteriv); LOAD(BindRenderbuffer); LOAD(GetFramebufferAttachmentParameteriv);
     LOAD(ClearDepthf); LOAD(Uniform1f); LOAD(ClearColor); LOAD(GetString); LOAD(GetFloatv); LOAD(DepthFunc); LOAD(DepthRangef);
 #undef LOAD
@@ -1562,6 +1595,20 @@ bool installGlHooks() {
     batch::setDepthClearObserver(&beforeDepthClear);
 
     gGetCurrentContext = reinterpret_cast<void* (*)()>(::dlsym(RTLD_DEFAULT, "eglGetCurrentContext"));
+
+    // Anything patched below is undone if the install does not complete: otherwise the game's import slots keep pointing at our
+    // detours while gActive is false, and removeGlHooks() (which returns early when inactive) would never restore them.
+    auto rollback = [] {
+        elf::restoreAll();
+        if (gEglInlineTarget) {
+            (void)pl::memory::unhook(gEglInlineTarget, reinterpret_cast<void*>(&eglGetProcAddressDetour));
+            gEglInlineTarget = nullptr;
+        }
+        if (gSwapInlineTarget) {
+            (void)pl::memory::unhook(gSwapInlineTarget, reinterpret_cast<void*>(&eglSwapBuffersDetour));
+            gSwapInlineTarget = nullptr;
+        }
+    };
 
     int gotSlots = 0;
     bool eglViaGot = false, swapViaGot = false;
@@ -1603,9 +1650,11 @@ bool installGlHooks() {
     }
 
     if (!swapViaGot && !swapInline) {
+        rollback();
         return false;
     }
     if (gotSlots == 0 && !eglViaGot && !eglInline) {
+        rollback();
         return false;
     }
     gSwapViaGot.store(swapViaGot);

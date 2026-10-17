@@ -10,7 +10,11 @@ namespace shadow {
 // With either > 0 the rewritten shaders write the finished shadow multiplier into alpha: (1 - x * smoothstep(start, end, block light)) * (1 - y * fog).
 constexpr const char* kLightUniform = "uShadowLight";
 
-enum class LightPatch { None, Chunk, ChunkVertex, Actor };  // ChunkVertex: the block vertex shader that feeds the Chunk fragment shader
+// mat3 uShadowSunDelta (vertex shader of the sun / moon quad): world position += delta * world position. All zero = the game's own sky.
+constexpr const char* kSunUniform = "uShadowSunDelta";
+constexpr const char* kSunTexture = "s_SunMoonTexture";  // sampler of the sun / moon fragment shader: marks the program as the real one
+
+enum class LightPatch { None, Chunk, ChunkVertex, Actor, SunMoon };  // ChunkVertex: the block vertex shader that feeds the Chunk fragment shader
 
 // Looks at one shader. If it is the render-chunk (blocks, vertex + fragment) or the actor (entities, fragment) shader and the output can be found, renames the
 // game's main() and appends a main() that calls it and then sets alpha. Returns what it patched (None: `source` is unchanged).
