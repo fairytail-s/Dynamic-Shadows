@@ -24,12 +24,13 @@ using VariableFn = void* (*)(void*, std::uint64_t, const char*);
 using NumberFn = float* (*)(void*);
 using MeshFn = void (*)(void*, void*, void*, void*, std::uint16_t, void*, void*, void*, const void*, void*, unsigned char, bool);
 using ClipFn = void (*)(void*, const void*, const void*);
+using HideHeldItemsFn = bool (*)(void*);
 using ScissorFn = std::uint16_t (*)(void*, std::uint16_t, std::uint16_t, std::uint16_t, std::uint16_t);
 
-std::atomic<void*> originalPass{}, originalCollectorInit{}, originalMesh{}, originalClip{};
+std::atomic<void*> originalPass{}, originalCollectorInit{}, originalMesh{}, originalClip{}, originalHideHeldItems{};
 RenderFn renderActor{};
 std::atomic_bool active{}, rendererReady{}, expected{};
-std::array<void*, 4> targets{};
+std::array<void*, 5> targets{};
 ContextFn getClientLocalPlayer{}, getOptions{}, getVariables{}, getScreen{};
 PerspectiveFn getPerspective{};
 VariableFn getVariable{};
@@ -149,6 +150,12 @@ void meshDetour(void* self, void* screen, void* data, void* material, std::uint1
              transform, extra, flags, environmental);
 }
 
+bool hideHeldItemsDetour(void* self) {
+    if (renderingCaster) return true;
+    auto original = reinterpret_cast<HideHeldItemsFn>(originalHideHeldItems.load(std::memory_order_acquire));
+    return original ? original(self) : false;
+}
+
 void clipDetour(void* self, const void* viewport, const void* region) {
     auto original = reinterpret_cast<ClipFn>(originalClip.load(std::memory_order_acquire));
     if (!original) return;
@@ -236,6 +243,7 @@ constexpr unsigned char kMesh[] = {0xf4, 0x4f, 0x05, 0xa9, 0xfd, 0x03, 0x00, 0x9
 constexpr unsigned char kScissor[] = {0xf4, 0x4f, 0x05, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0x19, 0x00, 0x40, 0xf9, 0x1a, 0xfa, 0x82, 0x52, 0xf3, 0x03, 0x00, 0xaa, 0xba, 0x1b, 0xa0, 0x72, 0xf4, 0x03, 0x04, 0x2a, 0xf5, 0x03, 0x03, 0x2a};
 constexpr unsigned char kScreen[] = {0x00, 0x14, 0x40, 0xf9, 0xc0, 0x03, 0x5f, 0xd6};
 constexpr unsigned char kClip[] = {0x08, 0x00, 0x40, 0xf9, 0x49, 0x00, 0x40, 0x39, 0x00, 0x09, 0x40, 0xf9, 0x29, 0x03, 0x00, 0x34, 0x28, 0x08, 0x40, 0x79, 0x29, 0x0c, 0x40, 0x79, 0x42, 0x8c, 0x41, 0x2d, 0x00, 0x01, 0x22, 0x1e, 0x21, 0x01, 0x22, 0x1e, 0x40, 0x08, 0x20, 0x1e, 0x61, 0x08, 0x21, 0x1e, 0x03, 0x00, 0x38, 0x1e, 0x24, 0x00, 0x38, 0x1e, 0x7f, 0x00, 0x00, 0x71, 0x84, 0x18, 0x40, 0x7a, 0xa0, 0x02, 0x00, 0x54, 0x00, 0x01, 0x22, 0x1e, 0x21, 0x01, 0x22, 0x1e, 0x2a, 0x00, 0x40, 0x79, 0x42, 0x8c, 0x40, 0x2d, 0x2b, 0x04, 0x40, 0x79, 0x40, 0x08, 0x20, 0x1e, 0x61, 0x08, 0x21, 0x1e, 0x08, 0x00, 0x38, 0x1e, 0x29, 0x00, 0x38, 0x1e, 0x01, 0x01, 0x0a, 0x0b, 0x22, 0x01, 0x0b, 0x0b, 0x31, 0x3c, 0x03, 0x14};
+constexpr unsigned char kHideHeldItems[] = {0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0x08, 0xf8, 0x41, 0xb9, 0x00, 0xc0, 0x07, 0x91, 0x1f, 0x05, 0x00, 0x71, 0x60, 0x00, 0x00, 0x54, 0xe0, 0x8f, 0x40, 0x95, 0x35, 0xb0, 0x41, 0x95, 0x00, 0x00, 0x40, 0xbd, 0x08, 0x20, 0x20, 0x1e};
 constexpr Entry kEntries[] = {
     {0xb2d447c, 20, kActorPass, sizeof(kActorPass)},
     {0xa647524, 20, kCollectorInit, sizeof(kCollectorInit)},
@@ -250,6 +258,7 @@ constexpr Entry kEntries[] = {
     {0xa965dcc, 0, kScreen, sizeof(kScreen)},
     {0x112f9db8, 0, kClip, sizeof(kClip)},
     {0xac09d84, 0, kPerspective, sizeof(kPerspective)},
+    {0xa706b78, 0, kHideHeldItems, sizeof(kHideHeldItems)},
 };
 
 constexpr unsigned char kClipSource[] = {0x60, 0xf2, 0x41, 0x39, 0xad, 0xe3, 0x41, 0x39, 0x61, 0xa2, 0x01, 0x91, 0xae, 0xc3, 0x41, 0x39};
@@ -294,10 +303,10 @@ bool installHooks() {
     getNumber = reinterpret_cast<NumberFn>(base + kEntries[7].rva);
     setScissor = reinterpret_cast<ScissorFn>(base + kEntries[9].rva);
     getScreen = reinterpret_cast<ContextFn>(base + kEntries[10].rva);
-    const std::array<void*, 4> detours{reinterpret_cast<void*>(&actorPassDetour), reinterpret_cast<void*>(&collectorInitDetour), reinterpret_cast<void*>(&meshDetour), reinterpret_cast<void*>(&clipDetour)};
-    const std::array<std::atomic<void*>*, 4> originals{&originalPass, &originalCollectorInit, &originalMesh, &originalClip};
-    constexpr std::array<unsigned, 4> entryIndices{0, 1, 8, 11};
-    for (int i = 3; i >= 0; --i) {
+    const std::array<void*, 5> detours{reinterpret_cast<void*>(&actorPassDetour), reinterpret_cast<void*>(&collectorInitDetour), reinterpret_cast<void*>(&meshDetour), reinterpret_cast<void*>(&clipDetour), reinterpret_cast<void*>(&hideHeldItemsDetour)};
+    const std::array<std::atomic<void*>*, 5> originals{&originalPass, &originalCollectorInit, &originalMesh, &originalClip, &originalHideHeldItems};
+    constexpr std::array<unsigned, 5> entryIndices{0, 1, 8, 11, 13};
+    for (int i = static_cast<int>(detours.size()) - 1; i >= 0; --i) {
         void* target = reinterpret_cast<void*>(base + kEntries[entryIndices[i]].rva);
         void* original = nullptr;
         if (pl::memory::hook(target, detours[i], &original, pl::memory::HookPriority::High) != 0 || !original) {
@@ -315,7 +324,7 @@ bool installHooks() {
 void removeHooks() {
     active.store(false, std::memory_order_release);
     expected.store(false, std::memory_order_relaxed);
-    const std::array<void*, 4> detours{reinterpret_cast<void*>(&actorPassDetour), reinterpret_cast<void*>(&collectorInitDetour), reinterpret_cast<void*>(&meshDetour), reinterpret_cast<void*>(&clipDetour)};
+    const std::array<void*, 5> detours{reinterpret_cast<void*>(&actorPassDetour), reinterpret_cast<void*>(&collectorInitDetour), reinterpret_cast<void*>(&meshDetour), reinterpret_cast<void*>(&clipDetour), reinterpret_cast<void*>(&hideHeldItemsDetour)};
     for (std::size_t i = 0; i < targets.size(); ++i) {
         if (targets[i]) (void)pl::memory::unhook(targets[i], detours[i]);
         targets[i] = nullptr;
