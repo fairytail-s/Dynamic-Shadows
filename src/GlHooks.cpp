@@ -97,7 +97,7 @@ struct ProgInfo {
     unsigned generation = 0;
     GLint view = -1, proj = -1, viewProj = -1, modelView = -1, modelViewProj = -1;
     GLint light = -1;
-    float lightVal[2] = {-1.0f, -1.0f};
+    float lightVal[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
     GLint sunDelta = -1, sunTex = -1;
     float sunVal[9] = {};
     bool sunKnown = false;
@@ -164,6 +164,9 @@ struct State {
     unsigned handDraws = 0;
     SceneInfo scene;
     unsigned skips = 0;
+    GLuint probeQuery = 0;
+    bool probePending = false, probeFailed = false;
+    unsigned emptyProbes = 0;
     Own own;
 };
 State& state() {
@@ -461,7 +464,6 @@ GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool casc
     return program;
 }
 
-
 bool hasFramebufferFetch() {
     static const bool has = [] {
         const char* ext = real.GetString ? reinterpret_cast<const char*>(real.GetString(GL_EXTENSIONS)) : nullptr;
@@ -580,10 +582,49 @@ bool ensureShadowMap(Own& own, int requestedRes, int columns, int bits, int filt
     return true;
 }
 
+constexpr unsigned kEmptyProbesToSkip = 30, kProbeEvery = 8;
+constexpr GLenum kAnySamplesConservative = 0x8D6A, kQueryResultAvailable = 0x8867, kQueryResult = 0x8866;
+
+bool probeSkipping(const State& st) {
+    return !st.probeFailed && st.emptyProbes >= kEmptyProbesToSkip && (st.frame % kProbeEvery) != 0 &&
+           config().skyFade.load(std::memory_order_relaxed) > 0.0f;
+}
+
+void pollProbe(State& st) {
+    if (!st.probePending) return;
+    GLuint available = 0;
+    real.GetQueryObjectuiv(st.probeQuery, kQueryResultAvailable, &available);
+    if (!available) return;
+    GLuint samples = 0;
+    real.GetQueryObjectuiv(st.probeQuery, kQueryResult, &samples);
+    st.probePending = false;
+    if (samples == 0) {
+        if (st.emptyProbes < 1000) ++st.emptyProbes;
+    } else {
+        st.emptyProbes = 0;
+    }
+}
+
+bool beginProbe(State& st) {
+    if (st.probeFailed || st.probePending || !real.GenQueries || !real.BeginQuery || !real.EndQuery || !real.GetQueryObjectuiv) return false;
+    if (config().skyFade.load(std::memory_order_relaxed) <= 0.0f || config().debugView.load(std::memory_order_relaxed)) {
+        st.emptyProbes = 0;
+        return false;
+    }
+    if (!st.probeQuery) {
+        real.GenQueries(1, &st.probeQuery);
+        if (!st.probeQuery) { st.probeFailed = true; return false; }
+    }
+    real.BeginQuery(kAnySamplesConservative, st.probeQuery);
+    st.probePending = true;
+    return true;
+}
+
 bool shadowModeActive(const State& st) {
     const auto& c = config();
     return gActive.load(std::memory_order_relaxed) && c.enabled.load(std::memory_order_relaxed) &&
-           (c.strength.load(std::memory_order_relaxed) > 0.001f || c.debugView.load(std::memory_order_relaxed)) && !st.own.failed && !st.own.smFailed;
+           (c.strength.load(std::memory_order_relaxed) > 0.001f || c.debugView.load(std::memory_order_relaxed)) && !st.own.failed && !st.own.smFailed &&
+           !probeSkipping(st);
 }
 
 void shadowFail(State& st) {
@@ -969,7 +1010,7 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
         restore(saved);
         return;
     }
-    const bool wantFetch = (c.lightFade.load() > 0.0f || c.fogFade.load() > 0.0f) && gLightPatched.load(std::memory_order_relaxed) > 0 && !own.fetchFailed && hasFramebufferFetch();
+    const bool wantFetch = gLightPatched.load(std::memory_order_relaxed) > 0 && !own.fetchFailed && hasFramebufferFetch();
     if (!ensureShadowProgram(own, sf.cascades == 2, wantFetch)) {
         restore(saved);
         return;
@@ -1049,11 +1090,13 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
     real.Uniform4f(own.smFilterUniform, static_cast<float>(c.filterQuality.load()), c.softness.load(), c.depthBias.load(), c.normalBias.load());
     real.Uniform4f(own.smAtlas, 1.0f / static_cast<float>(own.smColumns), own.smColumns == 2 ? 0.5f : 0.0f, 0.0f, 0.0f);
     real.Uniform4f(own.smTuning, c.fadeStart.load(), 0.0f, 0.0f, 0.0f);
-    if (own.smLight >= 0) real.Uniform4f(own.smLight, (c.lightFade.load() > 0.0f || c.fogFade.load() > 0.0f) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    if (own.smLight >= 0) real.Uniform4f(own.smLight, own.smFetch ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
     real.Uniform4f(own.smDepthRect, directDepth ? float(vx) / float(attachmentWidth) : 0.0f, directDepth ? float(vy) / float(attachmentHeight) : 0.0f,
                   directDepth ? float(w) / float(attachmentWidth) : 1.0f, directDepth ? float(h) / float(attachmentHeight) : 1.0f);
     real.BindVertexArray(own.vao);
+    const bool probing = beginProbe(st);
     real.DrawArrays(GL_TRIANGLES, 0, 3);
+    if (probing) real.EndQuery(kAnySamplesConservative);
 
     if (directDepth) {
         real.FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthAttach.object, 0);
@@ -1084,7 +1127,6 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
 
     st.skips = 0;
 }
-
 
 void resetSceneAlpha(GLuint sceneFbo) {
     Saved saved{};
@@ -1176,6 +1218,9 @@ void onContextChanged(State& st, void* ctx) {
     }
     st.smChecks = st.skips = 0;
     st.retries = st.failedFrames = 0;
+    st.probeQuery = 0;
+    st.probePending = st.probeFailed = false;
+    st.emptyProbes = 0;
 }
 
 bool hasContext(State& st) {
@@ -1212,22 +1257,21 @@ void watchdogStuckFrame(State& st) {
     endFrame(st);
 }
 
-
-
-
 void updateLightMode(State& st) {
     const GLint program = trackedProgram(st);
     if (program <= 0) return;
     ProgInfo& pi = progInfo(st, static_cast<GLuint>(program));
     if (pi.light < 0) return;
     const auto& c = config();
-    const float lightStrength = c.lightFade.load(), fogStrength = c.fogFade.load();
-    const bool on = c.enabled.load() && (lightStrength > 0.0f || fogStrength > 0.0f) && !st.own.failed && !st.own.fetchFailed && !st.shadowedThisFrame && !trackedBlend(st);
-    const float a = on ? lightStrength : 0.0f, b = on ? fogStrength : 0.0f;
-    if (pi.lightVal[0] != a || pi.lightVal[1] != b) {
-        real.Uniform4f(pi.light, a, b, 0.0f, 0.0f);
+    const float lightStrength = c.lightFade.load(), fogStrength = c.fogFade.load(), skyStrength = c.skyFade.load();
+    const bool on = c.enabled.load() && !st.own.failed && !st.own.fetchFailed && !st.shadowedThisFrame && !trackedBlend(st) && !probeSkipping(st);
+    const float a = on ? std::max(lightStrength, 0.0001f) : 0.0f, b = on ? fogStrength : 0.0f, d = on ? skyStrength : 0.0f;
+    if (pi.lightVal[0] != a || pi.lightVal[1] != b || pi.lightVal[2] != d || pi.lightVal[3] != 0.0f) {
+        real.Uniform4f(pi.light, a, b, d, 0.0f);
         pi.lightVal[0] = a;
         pi.lightVal[1] = b;
+        pi.lightVal[2] = d;
+        pi.lightVal[3] = 0.0f;
     }
     if (!on) return;
     if (!st.tr.maskKnown) {
@@ -1239,7 +1283,6 @@ void updateLightMode(State& st) {
         st.alphaForced = true;
     }
 }
-
 
 void updateSunMoon(State& st) {
     const GLint program = trackedProgram(st);
@@ -1429,7 +1472,6 @@ void colorMaskDetour(GLboolean r, GLboolean gr, GLboolean b, GLboolean a) {
     resolve(kColorMask, real.ColorMask)(r, gr, b, a);
 }
 
-
 void shaderSourceDetour(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length) {
     auto original = resolve(kShaderSource, real.ShaderSource);
     if (count > 0 && string && gActive.load(std::memory_order_relaxed)) {
@@ -1499,6 +1541,7 @@ void drawArraysInstancedDetour(GLenum mode, GLint first, GLsizei count, GLsizei 
 
 void endFrame(State& st) {
     batch::finishFrame();
+    pollProbe(st);
     if (config().updateInterval.load(std::memory_order_relaxed) > 1 && st.sf.ok && st.sf.draws > 0 && !st.sf.reused && !st.own.failed && !st.own.smFailed) {
         st.cachedShadow = st.sf;
         st.cachedShadowFrame = st.frame;
@@ -1652,13 +1695,16 @@ bool installGlHooks() {
     LOAD(GenSamplers); LOAD(SamplerParameteri); LOAD(GetTexLevelParameteriv); LOAD(GetRenderbufferParameteriv); LOAD(BindRenderbuffer); LOAD(GetFramebufferAttachmentParameteriv);
     LOAD(ClearDepthf); LOAD(Uniform1f); LOAD(ClearColor); LOAD(GetString); LOAD(GetFloatv); LOAD(DepthFunc); LOAD(DepthRangef);
 #undef LOAD
+    {
+        const bool required = complete;
+        load(real.GenQueries, "glGenQueries"); load(real.BeginQuery, "glBeginQuery"); load(real.EndQuery, "glEndQuery"); load(real.GetQueryObjectuiv, "glGetQueryObjectuiv");
+        complete = required;
+    }
     if (!complete) return false;
     gBatchAvailable = batch::loadApi(gles);
     batch::setDepthClearObserver(&beforeDepthClear);
 
     gGetCurrentContext = reinterpret_cast<void* (*)()>(::dlsym(RTLD_DEFAULT, "eglGetCurrentContext"));
-
-
 
     auto rollback = [] {
         elf::restoreAll();

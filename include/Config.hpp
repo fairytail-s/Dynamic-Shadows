@@ -12,6 +12,7 @@ constexpr float kDefaultElevation = 55.0f, kMinElevation = 10.0f, kMaxElevation 
 constexpr float kDefaultTilt = 0.0f, kMinTilt = -60.0f, kMaxTilt = 60.0f;
 constexpr bool kDefaultDayCycle = true, kDefaultMoon = true, kDefaultHand = true, kDefaultCascades = true, kDefaultCull = true, kDefaultBeforeBlend = true;
 constexpr int kDefaultShadowRes = 1536, kMinShadowRes = 256, kMaxShadowRes = 3072;
+constexpr float kDefaultSkyFade = 0.85f;
 constexpr float kDefaultShadowDist = 80.0f, kMinShadowDist = 16.0f, kMaxShadowDist = 192.0f;
 
 struct RuntimeConfig {
@@ -22,6 +23,7 @@ struct RuntimeConfig {
     std::atomic<float> strength{kDefaultStrength}, azimuth{kDefaultAzimuth}, elevation{kDefaultElevation}, tilt{kDefaultTilt};
     std::atomic<int> shadowRes{kDefaultShadowRes}, depthBits{24}, filterQuality{1}, updateInterval{1}, maxBatchDraws{4096};
     std::atomic<float> shadowDist{kDefaultShadowDist}, nearFraction{0.30f}, softness{0.85f}, depthBias{0.85f}, normalBias{0.65f};
+    std::atomic<float> skyFade{kDefaultSkyFade};
     std::atomic<float> lightFade{0.8f}, fogFade{1.0f}, fadeStart{0.85f}, tintRed{0.025f}, tintGreen{0.035f}, tintBlue{0.055f};
 };
 
@@ -66,6 +68,7 @@ inline constexpr std::array kFloatSettings{
     FloatSetting{"normal_bias", "Shadow contact offset", "Lower values keep shadows closer to the object. Raise if edges show unwanted streaks.", "advanced", "surface_stability", &RuntimeConfig::normalBias, 0.65f, 0.0f, 3.0f, 0.05f},
     FloatSetting{"fade_start", "Start distance fading", "Keep shadows at full strength until this portion of their maximum distance.", "appearance", "shadow_edges", &RuntimeConfig::fadeStart, 0.85f, 0.30f, 0.95f, 0.05f},
     FloatSetting{"light_fade", "Fade near light sources", "Shadows get weaker close to torches, glowstone and other light sources. 0 turns it off.", "appearance", "shadow_style", &RuntimeConfig::lightFade, 0.8f, 0.0f, 1.0f, 0.05f},
+    FloatSetting{"cave_fade", "Fade shadows underground", "Shadows get weaker where the terrain has little sky light, such as caves and deep overhangs, so hidden terrain above cannot leave uneven patches. 0 turns it off.", "appearance", "shadow_style", &RuntimeConfig::skyFade, kDefaultSkyFade, 0.0f, 1.0f, 0.05f},
     FloatSetting{"fog_fade", "Fade in fog", "Shadows fade out where the game's fog covers the world, so distant fogged terrain stays flat. 0 turns it off.", "appearance", "shadow_style", &RuntimeConfig::fogFade, 1.0f, 0.0f, 1.0f, 0.05f},
     FloatSetting{"azimuth", "Sun compass direction", "Fixed sun direction, or sunrise direction when following the day cycle.", "lighting", "light_position", &RuntimeConfig::azimuth, 90.0f, 0.0f, 360.0f, 5.0f},
     FloatSetting{"elevation", "Fixed sun height", "Light angle above the horizon when the day cycle is turned off.", "lighting", "light_position", &RuntimeConfig::elevation, 55.0f, 10.0f, 85.0f, 1.0f},

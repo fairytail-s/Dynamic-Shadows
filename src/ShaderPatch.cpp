@@ -90,6 +90,22 @@ constexpr const char* kLightFadeStart = "0.35";
 constexpr const char* kLightFadeEnd = "0.9";
 constexpr const char* kChunkLightExpr = "fract(a_texcoord1.y*vec2(256.0, 4096.0))";
 
+constexpr const char* kSkyFadeStart = "0.15";
+constexpr const char* kSkyFadeEnd = "0.60";
+
+bool isFlatColorShader(const std::string& s) {
+    if (s.find("sampler") != std::string::npos || findToken(s, "v_color0") == std::string::npos) return false;
+    std::size_t p = 0;
+    while ((p = s.find("v_", p)) != std::string::npos) {
+        const bool left = p == 0 || !isIdentChar(s[p - 1]);
+        std::size_t e = p + 2;
+        while (e < s.size() && isIdentChar(s[e])) ++e;
+        if (left && s.compare(p, e - p, "v_color0") != 0) return false;
+        p = e;
+    }
+    return true;
+}
+
 LightPatch patchLightShader(std::string& src) {
     const std::size_t mainName = findMainName(src);
     if (mainName == std::string::npos) return LightPatch::None;
@@ -127,6 +143,9 @@ LightPatch patchLightShader(std::string& src) {
         kind = LightPatch::Actor;
         blockLight = "clamp(TileLightIntensity.r, 0.0, 1.0)";
         if (findToken(src, "TileLightIntensity") == std::string::npos) decl = "\nuniform vec4 TileLightIntensity;";
+    } else if (isFlatColorShader(src)) {
+
+        kind = LightPatch::Sky;
     } else {
         return LightPatch::None;
     }
@@ -134,18 +153,26 @@ LightPatch patchLightShader(std::string& src) {
     if (out.empty()) return LightPatch::None;
 
     const std::string fog = findToken(src, "v_fog") != std::string::npos ? "clamp(v_fog.a, 0.0, 1.0)" : "0.0";
-    const std::string alpha = std::string("(1.0 - ") + kLightUniform + ".x * smoothstep(" + kLightFadeStart + ", " + kLightFadeEnd + ", " + blockLight + ")) * (1.0 - " +
-                              kLightUniform + ".y * " + fog + ")";
+    if (kind == LightPatch::Sky) blockLight = "0.0";
+    std::string alpha = std::string("(1.0 - ") + kLightUniform + ".x * smoothstep(" + kLightFadeStart + ", " + kLightFadeEnd + ", " + blockLight + ")) * (1.0 - " +
+                        kLightUniform + ".y * " + fog + ")";
+    if (kind == LightPatch::Sky) alpha = "0.0";
+    if (kind == LightPatch::Chunk) {
+        alpha += std::string(" * (1.0 - ") + kLightUniform + ".z * (1.0 - smoothstep(" + kSkyFadeStart + ", " + kSkyFadeEnd + ", clamp(" +
+                 kChunkLightVarying + ".y, 0.0, 1.0))))";
+    }
 
     src.replace(mainName, 4, "shadowOrigMain");
     src += decl;
-    src += "\nuniform vec4 ";
+    src += "\nuniform highp vec4 ";
     src += kLightUniform;
     src += ";\nvoid main()\n{\n    shadowOrigMain();\n    if (";
     src += kLightUniform;
     src += ".x + ";
     src += kLightUniform;
-    src += ".y > 0.0) ";
+    src += ".y + ";
+    src += kLightUniform;
+    src += ".z > 0.0) ";
     src += out + ".a = " + alpha + ";\n}\n";
     return kind;
 }

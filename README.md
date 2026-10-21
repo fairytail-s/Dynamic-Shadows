@@ -10,6 +10,7 @@ Dynamic Shadows is an open-source native mod for Minecraft Bedrock on Android, m
 - Adjustable darkness, softness, distance, and shadow color
 - Hand and held-item shading
 - Shadows fade out next to torches, glowstone and other light sources ("Fade near light sources", needs GL_EXT_shader_framebuffer_fetch)
+- Shadows fade out underground using the baked sky light ("Fade shadows underground", needs GL_EXT_shader_framebuffer_fetch)
 - Categorized mod-menu settings with persistent configuration
 
 ## Requirements

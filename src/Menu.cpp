@@ -59,7 +59,7 @@ std::string jsonQuote(std::string_view value) {
 }
 
 float displayScale(const FloatSetting& setting) {
-    return setting.value == &RuntimeConfig::strength || setting.value == &RuntimeConfig::lightFade || setting.value == &RuntimeConfig::fogFade || setting.value == &RuntimeConfig::nearFraction || setting.value == &RuntimeConfig::fadeStart ||
+    return setting.value == &RuntimeConfig::strength || setting.value == &RuntimeConfig::lightFade || setting.value == &RuntimeConfig::skyFade || setting.value == &RuntimeConfig::fogFade || setting.value == &RuntimeConfig::nearFraction || setting.value == &RuntimeConfig::fadeStart ||
            setting.value == &RuntimeConfig::tintRed || setting.value == &RuntimeConfig::tintGreen || setting.value == &RuntimeConfig::tintBlue ? 100.0f : 1.0f;
 }
 

@@ -62,7 +62,11 @@ void result(float shadow)
     if (uLight.x > 0.0) shadow *= outColor.a;
 #endif
     if (uTint.w > 0.5) outColor = vec4(vec3(1.0 - shadow), 1.0);
-    else outColor = vec4(uTint.rgb, shadow * uSun.w);
+    else {
+
+        if (shadow * uSun.w < 0.004) discard;
+        outColor = vec4(uTint.rgb, shadow * uSun.w);
+    }
 }
 )GLSL";
 
@@ -89,12 +93,17 @@ float cascade(int k, mat4 lightVP, vec4 sm, vec3 P, vec3 normal, vec2 bias, out 
 void main()
 {
     float raw = texture(uDepth, uDepthRect.xy + uv * uDepthRect.zw).r;
-    bool sky = uCam.w > 0.5 ? raw < 0.00001 : raw > 0.99999;
+
+    bool sky = uCam.w > 0.5 ? raw < 0.0001 : raw > 0.9999;
     float d = uCam.w > 0.5 ? 1.0 - raw : raw;
     vec4 clip = worldBase + uInvVP[2] * (d * 2.0 - 1.0);
     vec3 P = clip.xyz / clip.w;
     vec3 dx = dFdx(P), dy = dFdy(P);
-    if (sky) { result(0.0); return; }
+    if (sky) {
+        if (uTint.w > 0.5) { outColor = vec4(0.0, 0.35, 1.0, 1.0); return; }
+        result(0.0);
+        return;
+    }
     vec3 n = cross(dx, dy);
     n *= inversesqrt(max(dot(n, n), 1e-20));
     vec3 toCam = uCam.xyz - P;
@@ -106,7 +115,12 @@ void main()
     bool edge = max(dot(dx, dx), dot(dy, dy)) > 0.0064 * dist2;
     float ndl = edge ? 1.0 : max(dot(n, uSun.xyz), 0.0);
     float lit = edge ? 1.0 : smoothstep(0.0, 0.2, ndl);
-    if (lit <= 0.0 || dist2 >= uMisc.w * uMisc.w) { result(1.0 - lit); return; }
+    if (lit <= 0.0 || dist2 >= uMisc.w * uMisc.w) {
+
+        float farFade = 1.0 - smoothstep(uMisc.w * 2.0, uMisc.w * 3.0, sqrt(dist2));
+        result((1.0 - lit) * farFade);
+        return;
+    }
     float dist = sqrt(dist2);
     float fade = 1.0 - smoothstep(uTuning.x * uMisc.w, uMisc.w, dist);
     float sinT = sqrt(max(1.0 - ndl * ndl, 0.0));

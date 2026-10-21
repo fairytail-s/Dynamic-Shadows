@@ -110,6 +110,10 @@ struct Gl {
     void (*GetFloatv)(GLenum, GLfloat*);
     void (*DepthFunc)(GLenum);
     void (*DepthRangef)(GLfloat, GLfloat);
+    void (*GenQueries)(GLsizei, GLuint*);
+    void (*BeginQuery)(GLenum, GLuint);
+    void (*EndQuery)(GLenum);
+    void (*GetQueryObjectuiv)(GLuint, GLenum, GLuint*);
 };
 inline Gl real{};
 
