@@ -63,7 +63,7 @@ struct Attach {
 template<std::size_t N> struct ShaderVariant { GLuint program{}; std::array<GLint, N> locations{}; };
 
 struct Own {
-    std::array<ShaderVariant<16>, 8> worldShaders;
+    std::array<ShaderVariant<18>, 16> worldShaders;
     std::array<ShaderVariant<9>, 2> handShaders;
     int worldVariant{-1}, handVariant{-1};
     GLuint vao = 0, blitFbo = 0, depthTex = 0;
@@ -79,8 +79,18 @@ struct Own {
     bool smFailed = false;
     unsigned smGen = 0;
     GLint smDepth = -1, smShadow = -1, smInvVP = -1, smLightVP0 = -1, smLightVP1 = -1, smCam = -1, smSun = -1, smSm0 = -1, smSm1 = -1, smMisc = -1, smTint = -1, smFilterUniform = -1, smAtlas = -1, smTuning = -1, smDepthRect = -1, smLight = -1;
+    GLint smTintDepthUniform = -1, smTintColorUniform = -1;
     bool smFetch = false;
     bool fetchFailed = false;
+
+    // Separate, non-atlased target that translucent casters render their real (lit, textured,
+    // alpha-blended) color into, used only when translucent_tint is on. Depth here is a plain
+    // (non-comparison) texture: nearest translucent surface per texel wins via ordinary z-testing,
+    // and its blended color is what gets sampled back as the tint. Built once per frame alongside
+    // the main occluder map, at own.smRes, using the far cascade's light transform (lightVP[1]).
+    GLuint smTintFbo = 0, smTintDepthTex = 0, smTintColorTex = 0;
+    int smTintRes = 0;
+    bool tintFailed = false;
 
     GLuint handProgram = 0;
     bool handFailed = false;
@@ -123,6 +133,7 @@ struct ShadowFrame {
     float center[3]{}, sun[3]{};
     float strength = 1.0f;
     unsigned draws = 0;
+    bool wantTint = false;
 };
 
 struct State {
@@ -272,7 +283,7 @@ ProgInfo& progInfo(State& st, GLuint program) {
     return stored;
 }
 
-constexpr int kDepthUnit = 15, kShadowUnit = 13;
+constexpr int kDepthUnit = 15, kShadowUnit = 13, kTintDepthUnit = 12, kTintColorUnit = 11;
 
 bool compile(GLuint shader, const char* source) {
     real.ShaderSource(shader, 1, &source, nullptr);
@@ -431,9 +442,10 @@ void restore(const Saved& s) {
     real.ColorMask(s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]);
 }
 
-GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool cascades, bool fetch = false) {
+GLuint buildProgram(const char* fragmentBody, bool world, bool smooth, bool cascades, bool fetch = false, bool tint = false) {
     const std::string defines = std::string("#define SHADOW_SMOOTH ") + (smooth ? "1\n" : "0\n") +
-        (world ? std::string("#define SHADOW_WORLD 1\n#define SHADOW_CASCADES ") + (cascades ? "1\n" : "0\n") : "");
+        (world ? std::string("#define SHADOW_WORLD 1\n#define SHADOW_CASCADES ") + (cascades ? "1\n" : "0\n") +
+                 (tint ? "#define SHADOW_TINT 1\n" : "") : "");
     const auto specialize = [&](const char* source) {
         std::string result(source);
         result.insert(result.find('\n') + 1, defines);
@@ -473,23 +485,28 @@ bool hasFramebufferFetch() {
     return has;
 }
 
-bool ensureShadowProgram(Own& own, bool cascades, bool fetch) {
+bool ensureShadowProgram(Own& own, bool cascades, bool fetch, bool tint = false) {
     const bool smooth = own.smFilter == 2;
-    const int index = (fetch ? 4 : 0) + (cascades ? 2 : 0) + int(smooth);
+    const int index = (tint ? 8 : 0) + (fetch ? 4 : 0) + (cascades ? 2 : 0) + int(smooth);
     if (own.smProgram && own.worldVariant == index) { own.smFetch = fetch; return true; }
     auto& variant = own.worldShaders[index];
     if (!variant.program) {
-        variant.program = buildProgram(kShadowMapBody, true, smooth, cascades, fetch);
+        variant.program = buildProgram(kShadowMapBody, true, smooth, cascades, fetch, tint);
         if (!variant.program && fetch) {
             own.fetchFailed = true;
-            return ensureShadowProgram(own, cascades, false);
+            return ensureShadowProgram(own, cascades, false, tint);
+        }
+        if (!variant.program && tint) {
+            own.tintFailed = true;
+            return ensureShadowProgram(own, cascades, fetch, false);
         }
         if (!variant.program) { own.smFailed = true; return false; }
-        constexpr const char* names[]{"uDepth", "uShadow", "uInvVP", "uLightVP0", "uLightVP1", "uCam", "uSun", "uSm0", "uSm1", "uMisc", "uTint", "uFilter", "uAtlas", "uTuning", "uDepthRect", "uLight"};
+        constexpr const char* names[]{"uDepth", "uShadow", "uInvVP", "uLightVP0", "uLightVP1", "uCam", "uSun", "uSm0", "uSm1", "uMisc", "uTint", "uFilter", "uAtlas", "uTuning", "uDepthRect", "uLight", "uTintDepth", "uTintColor"};
         for (std::size_t i = 0; i < variant.locations.size(); ++i) variant.locations[i] = real.GetUniformLocation(variant.program, names[i]);
     }
-    const std::array<GLint*, 16> locations{&own.smDepth, &own.smShadow, &own.smInvVP, &own.smLightVP0, &own.smLightVP1, &own.smCam, &own.smSun,
-        &own.smSm0, &own.smSm1, &own.smMisc, &own.smTint, &own.smFilterUniform, &own.smAtlas, &own.smTuning, &own.smDepthRect, &own.smLight};
+    const std::array<GLint*, 18> locations{&own.smDepth, &own.smShadow, &own.smInvVP, &own.smLightVP0, &own.smLightVP1, &own.smCam, &own.smSun,
+        &own.smSm0, &own.smSm1, &own.smMisc, &own.smTint, &own.smFilterUniform, &own.smAtlas, &own.smTuning, &own.smDepthRect, &own.smLight,
+        &own.smTintDepthUniform, &own.smTintColorUniform};
     for (std::size_t i = 0; i < locations.size(); ++i) *locations[i] = variant.locations[i];
     own.smProgram = variant.program;
     own.worldVariant = index;
@@ -579,6 +596,58 @@ bool ensureShadowMap(Own& own, int requestedRes, int columns, int bits, int filt
     own.smBits = bits;
     own.smFilter = filter;
 
+    return true;
+}
+
+// Standalone (non-atlased) depth+color target that translucent casters render into when
+// translucent_tint is on. Always sized at own.smRes with no cascade columns, since tinted
+// translucents only ever use the far cascade's light transform (see shadowReplay's nearCascade
+// restriction). Torn down automatically if it ever fails, so the tint shader variant is skipped
+// instead of sampling a missing texture.
+constexpr GLenum kColorAttachment0 = 0x8CE0, kRgba8 = 0x8058;
+bool ensureTintMap(Own& own, int res) {
+    if (own.tintFailed) return false;
+    if (own.smTintFbo && own.smTintColorTex && res == own.smTintRes) return true;
+    {
+        Saved saved{};
+        save(saved);
+        if (own.smTintColorTex) real.DeleteTextures(1, &own.smTintColorTex);
+        if (own.smTintDepthTex) real.DeleteTextures(1, &own.smTintDepthTex);
+        own.smTintColorTex = own.smTintDepthTex = 0;
+
+        real.ActiveTexture(GL_TEXTURE0 + kTintColorUnit);
+        real.GenTextures(1, &own.smTintColorTex);
+        real.BindTexture(GL_TEXTURE_2D, own.smTintColorTex);
+        real.TexStorage2D(GL_TEXTURE_2D, 1, kRgba8, res, res);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        real.ActiveTexture(GL_TEXTURE0 + kTintDepthUnit);
+        real.GenTextures(1, &own.smTintDepthTex);
+        real.BindTexture(GL_TEXTURE_2D, own.smTintDepthTex);
+        real.TexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT24, res, res);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        real.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // No TEXTURE_COMPARE_MODE here (unlike the main shadow texture): this one is read back as a
+        // plain float depth value in the shader, not through a hardware shadow-compare sampler.
+
+        if (!own.smTintFbo) real.GenFramebuffers(1, &own.smTintFbo);
+        real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, own.smTintFbo);
+        real.DrawBuffers(1, &kColorAttachment0);
+        real.FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, kColorAttachment0, GL_TEXTURE_2D, own.smTintColorTex, 0);
+        real.FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, own.smTintDepthTex, 0);
+        const GLenum status = real.CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+        restore(saved);
+        if (status != GL_FRAMEBUFFER_COMPLETE || real.GetError() != 0) {
+            own.tintFailed = true;
+            return false;
+        }
+        own.smTintRes = res;
+    }
     return true;
 }
 
@@ -738,9 +807,13 @@ bool beginShadowFrame(State& st, const ProgInfo& pi, GLuint fbo) {
         if (sf.haveView) sf.Tv[k] = mul(light.view, invView);
     }
 
+    sf.wantTint = c.translucentTint.load(std::memory_order_relaxed) && ensureTintMap(own, res);
+
     real.GetIntegerv(GL_VIEWPORT, sf.viewport);
     GLfloat clearDepth = 1.0f;
     real.GetFloatv(GL_DEPTH_CLEAR_VALUE, &clearDepth);
+    GLfloat clearColor[4]{};
+    real.GetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
     const GLboolean scissor = real.IsEnabled(GL_SCISSOR_TEST);
     real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, own.smFbo);
     real.Viewport(0, 0, own.smRes * own.smColumns, own.smRes);
@@ -748,6 +821,17 @@ bool beginShadowFrame(State& st, const ProgInfo& pi, GLuint fbo) {
     real.ClearDepthf(1.0f);
     real.Clear(GL_DEPTH_BUFFER_BIT);
     real.ClearDepthf(clearDepth);
+    if (sf.wantTint) {
+        // Alpha 0 means "nothing translucent here" to the composite shader; depth 1.0 (far plane)
+        // means a tint sample there can never be nearer-to-light than a real surface.
+        real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, own.smTintFbo);
+        real.Viewport(0, 0, own.smRes, own.smRes);
+        real.ClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        real.ClearDepthf(1.0f);
+        real.Clear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+        real.ClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+        real.ClearDepthf(clearDepth);
+    }
     if (scissor) real.Enable(GL_SCISSOR_TEST);
     real.Viewport(sf.viewport[0], sf.viewport[1], sf.viewport[2], sf.viewport[3]);
     real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
@@ -766,7 +850,7 @@ struct DrawCall {
 };
 
 struct DrawCtx {
-    bool replay = false, shadowOnly = false;
+    bool replay = false, shadowOnly = false, translucent = false;
     GLint fbo = 0, program = 0;
 };
 
@@ -828,7 +912,11 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
     Swap swaps[2][5];
     bool want[2] = {false, false};
     int n = 0;
-    for (int k = sf.cascades == 2 ? 0 : 1; k < 2; ++k) {
+    // Translucent casters skip the near cascade: it only sharpens close-up detail, and a glass pane
+    // or water surface rarely needs that — the far cascade alone still covers the full shadow
+    // distance, just at lower resolution, at roughly half the draw-call cost of doing both.
+    const bool nearCascade = sf.cascades == 2 && !ctx.translucent;
+    for (int k = nearCascade ? 0 : 1; k < 2; ++k) {
         int m = 0;
         if (pi.viewProj >= 0) swaps[k][m++] = {pi.viewProj, &pi.vVP, sf.lightVP[k]};
         if (pi.modelViewProj >= 0) {
@@ -850,7 +938,18 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
     }
     if (!want[0] && !want[1]) return;
 
-    if (sf.batchDraws) {
+    // A translucent draw may need to go to either or both of two separate targets: the depth-only
+    // occluder atlas (binary blocking, only if translucent_casters is on) and the standalone tint
+    // target (real color kept, only if translucent_tint set up successfully this frame). An opaque
+    // draw only ever goes to the occluder atlas, as before.
+    const bool asOccluder = !ctx.translucent || config().translucentCasters.load(std::memory_order_relaxed);
+    const bool asTint = ctx.translucent && sf.wantTint;
+    if (!asOccluder && !asTint) return;
+
+    // Batching only ever targets the occluder atlas, and only opaque draws use it — translucent
+    // draws are comparatively rare (a few glass panes and water surfaces, not a whole chunk of
+    // terrain) and may need the extra tint submission below, so they always take the immediate path.
+    if (sf.batchDraws && !ctx.translucent) {
         std::array<batch::MatrixUpload, 5> uploads{};
         const int first = want[0] ? 0 : 1;
         unsigned mask = 0;
@@ -885,34 +984,49 @@ void shadowReplay(State& st, const DrawCtx& ctx, const DrawCall& dc) {
     const GLboolean stencil = real.IsEnabled(GL_STENCIL_TEST), cullFace = real.IsEnabled(GL_CULL_FACE);
     GLfloat depthRange[2]{};
     real.GetFloatv(GL_DEPTH_RANGE, depthRange);
-    real.ColorMask(0, 0, 0, 0);
     if (!depthTest) real.Enable(GL_DEPTH_TEST);
     if (!depthMask) real.DepthMask(1);
-    if (blend) real.Disable(GL_BLEND);
     real.Disable(GL_STENCIL_TEST);
     if (sf.twoSided) real.Disable(GL_CULL_FACE);
     real.DepthRangef(0.0f, 1.0f);
-    real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, own.smFbo);
     if (scissor) real.Disable(GL_SCISSOR_TEST);
 
     const bool fixDepthFunc = depthFunc != static_cast<GLint>(GL_LESS) && depthFunc != static_cast<GLint>(GL_LEQUAL);
     if (fixDepthFunc) real.DepthFunc(GL_LESS);
-    int lastSet = -1;
-    for (int k = 0; k < 2; ++k) {
-        if (!want[k]) continue;
-        real.Viewport((own.smColumns == 2 ? k : 0) * own.smRes, 0, own.smRes, own.smRes);
-        for (int i = 0; i < n; ++i) real.UniformMatrix4fv(swaps[k][i].location, 1, 0, swaps[k][i].light.data());
-        issue(dc);
 
-        lastSet = k;
-    }
+    // real.Enable/real.Disable bypass the tracked-state cache (st.tr.blend), so toggling blend here
+    // has to be tracked by hand rather than by re-reading trackedBlend — the cache must still read
+    // correctly once this function returns and hands control back to the real draw call.
+    bool blendNow = blend;
+    const auto setBlend = [&](bool want) {
+        if (want == blendNow) return;
+        if (want) real.Enable(GL_BLEND); else real.Disable(GL_BLEND);
+        blendNow = want;
+    };
+    int lastSet = -1;
+    const auto submit = [&](GLuint targetFbo, bool keepColor) {
+        real.ColorMask(keepColor ? colorMask[0] : 0, keepColor ? colorMask[1] : 0, keepColor ? colorMask[2] : 0, keepColor ? colorMask[3] : 0);
+        setBlend(keepColor && blend);
+        real.BindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFbo);
+        for (int k = 0; k < 2; ++k) {
+            if (!want[k]) continue;
+            if (targetFbo == own.smFbo) real.Viewport((own.smColumns == 2 ? k : 0) * own.smRes, 0, own.smRes, own.smRes);
+            else real.Viewport(0, 0, own.smRes, own.smRes);
+            for (int i = 0; i < n; ++i) real.UniformMatrix4fv(swaps[k][i].location, 1, 0, swaps[k][i].light.data());
+            issue(dc);
+            lastSet = k;
+        }
+    };
+    if (asOccluder) submit(own.smFbo, false);
+    if (asTint) submit(own.smTintFbo, true);
+    setBlend(blend);
+
     for (int i = 0; i < n; ++i) real.UniformMatrix4fv(swaps[lastSet][i].location, 1, 0, swaps[lastSet][i].camera->data());
     real.ColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
     setEnabled(GL_STENCIL_TEST, stencil);
     setEnabled(GL_CULL_FACE, cullFace);
     real.DepthRangef(depthRange[0], depthRange[1]);
     if (fixDepthFunc) real.DepthFunc(static_cast<GLenum>(depthFunc));
-    if (blend) real.Enable(GL_BLEND);
     if (!depthMask) real.DepthMask(0);
     if (!depthTest) real.Disable(GL_DEPTH_TEST);
     if (scissor) real.Enable(GL_SCISSOR_TEST);
@@ -1011,10 +1125,14 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
         return;
     }
     const bool wantFetch = gLightPatched.load(std::memory_order_relaxed) > 0 && !own.fetchFailed && hasFramebufferFetch();
-    if (!ensureShadowProgram(own, sf.cascades == 2, wantFetch)) {
+    const bool wantTint = sf.wantTint && !own.tintFailed && own.smTintColorTex != 0;
+    if (!ensureShadowProgram(own, sf.cascades == 2, wantFetch, wantTint)) {
         restore(saved);
         return;
     }
+    // ensureShadowProgram silently falls back to a non-tint variant if the tint shader failed to
+    // compile (sets own.tintFailed and retries) — own.worldVariant says which one actually linked.
+    const bool tintActive = wantTint && own.worldVariant >= 8;
     const int attachmentWidth = w, attachmentHeight = h;
     if (sceneFbo != 0) {
         vx = sf.viewport[0]; vy = sf.viewport[1];
@@ -1091,6 +1209,16 @@ void runShadowPassImpl(State& st, GLuint sceneFbo) {
     real.Uniform4f(own.smAtlas, 1.0f / static_cast<float>(own.smColumns), own.smColumns == 2 ? 0.5f : 0.0f, 0.0f, 0.0f);
     real.Uniform4f(own.smTuning, c.fadeStart.load(), 0.0f, 0.0f, 0.0f);
     if (own.smLight >= 0) real.Uniform4f(own.smLight, own.smFetch ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    if (tintActive) {
+        real.ActiveTexture(GL_TEXTURE0 + kTintDepthUnit);
+        real.BindTexture(GL_TEXTURE_2D, own.smTintDepthTex);
+        real.BindSampler(kTintDepthUnit, 0);
+        real.Uniform1i(own.smTintDepthUniform, kTintDepthUnit);
+        real.ActiveTexture(GL_TEXTURE0 + kTintColorUnit);
+        real.BindTexture(GL_TEXTURE_2D, own.smTintColorTex);
+        real.BindSampler(kTintColorUnit, 0);
+        real.Uniform1i(own.smTintColorUniform, kTintColorUnit);
+    }
     real.Uniform4f(own.smDepthRect, directDepth ? float(vx) / float(attachmentWidth) : 0.0f, directDepth ? float(vy) / float(attachmentHeight) : 0.0f,
                   directDepth ? float(w) / float(attachmentWidth) : 1.0f, directDepth ? float(h) / float(attachmentHeight) : 1.0f);
     real.BindVertexArray(own.vao);
@@ -1357,17 +1485,31 @@ DrawCtx onDraw() {
     }
     const bool depthMask = trackedDepthMask(st);
     const bool blend = trackedBlend(st);
-    if (depthMask && !blend) {
+    // Translucent draws (blending enabled, e.g. water/glass/leaves) are normally never captured:
+    // only draws with depthMask on and blending off reach the branch below. When translucentCasters
+    // is on, let blended draws be replayed into the shadow depth atlas too, so they occlude light
+    // like solid geometry. They deliberately don't bump opaqueSeen, since that counter only drives
+    // the "beforeBlend" early-trigger heuristic for *opaque* draws.
+    const bool translucentCapture = blend && (config().translucentCasters.load(std::memory_order_relaxed) || config().translucentTint.load(std::memory_order_relaxed));
+    if ((depthMask && !blend) || translucentCapture) {
         if (st.sf.fbo < 0) st.sf.fbo = drawFbo();
         if (drawFbo() == st.sf.fbo) {
-            ++st.opaqueSeen;
+            if (!blend) ++st.opaqueSeen;
             if (!st.shadowedThisFrame) {
                 ctx.replay = true;
+                ctx.translucent = blend;
                 ctx.fbo = fbo;
                 ctx.program = program;
             }
         }
-    } else if (!ctx.shadowOnly && blend && config().beforeBlend.load() && !st.earlyDisabled && !st.shadowedThisFrame && st.sf.ok && st.sf.draws > 0 &&
+    }
+    // The early "beforeBlend" trigger finalizes the shadow map (and composites it onto the scene)
+    // right as blending starts, which would cut off translucent geometry before most of it has even
+    // drawn. So when translucentCasters is on, skip the early trigger entirely: the shadow map then
+    // stays open for the whole translucent pass and only finalizes at the next depth clear
+    // (see beforeDepthClear), which also means the shadow composite happens *after* transparent
+    // objects are drawn instead of before — so they receive shadows too, not just cast them.
+    if (!ctx.shadowOnly && blend && !translucentCapture && config().beforeBlend.load() && !st.earlyDisabled && !st.shadowedThisFrame && st.sf.ok && st.sf.draws > 0 &&
                st.prevOpaqueSeen >= 30 && st.opaqueSeen * 100 >= st.prevOpaqueSeen * (st.prevEarly ? 75u : 90u) && drawFbo() == st.sf.fbo &&
                !player::casterExpected() && !st.sf.expectPlayer && canShow(st)) {
         st.earlyThisFrame = true;

@@ -38,6 +38,12 @@ uniform vec4 uLight;
 #else
 out vec4 outColor;
 #endif
+#ifdef SHADOW_TINT
+// Set by the shadow-map body before calling result(), from the standalone translucent tint
+// target. gTintAlpha 0 means "no translucent surface was between the light and this point".
+vec3 gTintColor = vec3(1.0);
+float gTintAlpha = 0.0;
+#endif
 
 float shadowTaps(vec2 base, float ref, int cascadeIndex)
 {
@@ -61,12 +67,20 @@ void result(float shadow)
 
     if (uLight.x > 0.0) shadow *= outColor.a;
 #endif
-    if (uTint.w > 0.5) outColor = vec4(vec3(1.0 - shadow), 1.0);
-    else {
-
-        if (shadow * uSun.w < 0.004) discard;
-        outColor = vec4(uTint.rgb, shadow * uSun.w);
-    }
+    if (uTint.w > 0.5) { outColor = vec4(vec3(1.0 - shadow), 1.0); return; }
+#ifdef SHADOW_TINT
+    // Where a translucent surface sits between the light and this point, let it color the overlay
+    // instead of (or alongside) the usual flat shadow tint, and let it darken the point a little
+    // even where the opaque shadow test alone found nothing blocking — glass still dims and colors
+    // light that passes through it, independent of whether anything opaque is also in the way.
+    float a = max(shadow * uSun.w, gTintAlpha * uSun.w * 0.85);
+    if (a < 0.004) discard;
+    vec3 col = mix(uTint.rgb, uTint.rgb * gTintColor, gTintAlpha);
+    outColor = vec4(col, a);
+#else
+    if (shadow * uSun.w < 0.004) discard;
+    outColor = vec4(uTint.rgb, shadow * uSun.w);
+#endif
 }
 )GLSL";
 
@@ -80,6 +94,13 @@ uniform vec4 uSm1;
 uniform vec4 uTuning;
 uniform vec4 uDepthRect;
 in highp vec4 worldBase;
+#ifdef SHADOW_TINT
+// Plain (non shadow-compare) depth + color from the standalone translucent tint target. Always
+// built with the far cascade's transform (uLightVP1 / uSm1), regardless of whether the near
+// cascade is in use for the hard occluder shadow — see shadowReplay's nearCascade restriction.
+uniform highp sampler2D uTintDepth;
+uniform highp sampler2D uTintColor;
+#endif
 
 float cascade(int k, mat4 lightVP, vec4 sm, vec3 P, vec3 normal, vec2 bias, out float border)
 {
@@ -126,6 +147,25 @@ void main()
     float sinT = sqrt(max(1.0 - ndl * ndl, 0.0));
     float tanT = clamp(sinT / max(ndl, 0.05), 0.0, 4.0);
     vec2 bias = vec2(1.5 + sinT, 1.0 + 2.0 * tanT);
+#ifdef SHADOW_TINT
+    {
+        // Same light-space projection as cascade(1, ...) below, duplicated here (rather than
+        // threading an out-parameter through cascade()) since the hard shadow test and the tint
+        // test use different source textures and don't otherwise share this value.
+        vec3 q = P + n * min(uSm1.x * bias.x * uFilter.w, 0.6 * uFilter.w);
+        vec3 s = (uLightVP1 * vec4(q, 1.0)).xyz * 0.5 + 0.5;
+        float tb = max(abs(s.x * 2.0 - 1.0), abs(s.y * 2.0 - 1.0));
+        if (tb < 1.0 && s.z > 0.0 && s.z < 1.0) {
+            float td = texture(uTintDepth, s.xy).r;
+            float ref = s.z - uSm1.x * bias.y * uFilter.z / uSm1.y;
+            if (td < ref) {
+                vec4 tc = texture(uTintColor, s.xy);
+                gTintAlpha = tc.a * (1.0 - smoothstep(0.85, 1.0, tb));
+                gTintColor = tc.rgb;
+            }
+        }
+    }
+#endif
     float border = 2.0, nearShadow = 0.0, farShadow = 0.0, nearWeight = 0.0;
 #if SHADOW_CASCADES
     {

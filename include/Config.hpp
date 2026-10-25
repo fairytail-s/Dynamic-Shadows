@@ -19,6 +19,7 @@ struct RuntimeConfig {
     std::atomic_bool enabled{true}, reversedDepth{false}, debugView{false};
     std::atomic_bool dayCycle{kDefaultDayCycle}, moon{kDefaultMoon}, handShadow{kDefaultHand}, cascades{kDefaultCascades};
     std::atomic_bool beforeBlend{kDefaultBeforeBlend}, cullDraws{kDefaultCull}, batchDraws{true}, directDepth{true};
+    std::atomic_bool translucentCasters{false}, translucentTint{false};
     std::atomic_bool twoSided{false}, layoutSnapshots{true}, syncSun{true};
     std::atomic<float> strength{kDefaultStrength}, azimuth{kDefaultAzimuth}, elevation{kDefaultElevation}, tilt{kDefaultTilt};
     std::atomic<int> shadowRes{kDefaultShadowRes}, depthBits{24}, filterQuality{1}, updateInterval{1}, maxBatchDraws{4096};
@@ -53,7 +54,9 @@ inline constexpr std::array kBoolSettings{
     BoolSetting{"batch_shadow_draws", "Group shadow draws", "Draw compatible objects together. Keep on unless shadows appear incorrect.", "performance", "render_work", &RuntimeConfig::batchDraws, true},
     BoolSetting{"cache_shadow_layouts", "Reuse geometry layouts", "Keep shadow draws grouped when the game changes geometry. Turn off only for compatibility.", "performance", "render_work", &RuntimeConfig::layoutSnapshots, true},
     BoolSetting{"direct_depth_sampling", "Avoid extra depth copies", "Use the existing scene depth when supported. Other targets use a safe copy automatically.", "performance", "render_work", &RuntimeConfig::directDepth, true},
-    BoolSetting{"shadow_before_blend", "Shadows behind water and glass", "Apply shadows before transparent objects when the game draw order allows it.", "advanced", "compatibility", &RuntimeConfig::beforeBlend, true},
+    BoolSetting{"shadow_before_blend", "Shadows behind water and glass", "Apply shadows before transparent objects when the game draw order allows it. Turned off automatically while translucent casters are enabled, since that needs the shadow map finished after transparent objects draw.", "advanced", "compatibility", &RuntimeConfig::beforeBlend, true},
+    BoolSetting{"translucent_casters", "Water and glass cast shadows", "Let transparent objects (water, glass, leaves drawn with blending) block light in the shadow map like solid blocks, instead of only opaque geometry. Delays the shadow pass until after transparent objects draw, so it also costs a bit more and disables the option above automatically.", "appearance", "shadow_style", &RuntimeConfig::translucentCasters, false},
+    BoolSetting{"translucent_tint", "Tint shadows through glass and water", "Color the shadow by the actual color of transparent objects it passes through, like light through stained glass, instead of only fully blocking or fully passing. Also delays the shadow pass until after transparent objects draw, and costs more: it renders transparent objects a second time into their own small map. Works best on its own, without 'Water and glass cast shadows' turned on too, since that makes those objects fully block light instead and the tint becomes hard to notice.", "appearance", "shadow_style", &RuntimeConfig::translucentTint, false},
     BoolSetting{"two_sided_casters", "Thin objects cast on both sides", "Can help thin surfaces. Draws extra faces and may reduce FPS.", "advanced", "compatibility", &RuntimeConfig::twoSided, false},
     BoolSetting{"reversed_depth", "Reverse scene depth", "Compatibility setting. Change only if shadows do not line up with the scene.", "advanced", "compatibility", &RuntimeConfig::reversedDepth, false},
     BoolSetting{"debug_view", "Preview the shadow mask", "Show only lit and shadowed areas while adjusting the look.", "advanced", "surface_stability", &RuntimeConfig::debugView, false}
