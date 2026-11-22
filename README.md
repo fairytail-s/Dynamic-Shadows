@@ -17,7 +17,7 @@ Dynamic Shadows is an open-source native mod for Minecraft Bedrock on Android, m
 
 - Android 9 or newer and a 64-bit ARM device (`arm64-v8a`)
 - [LeviLauncher](https://github.com/LiteLDev/LeviLaunchroid) to load the mod
-- Minecraft Bedrock **26.52**
+- Minecraft Bedrock **26.62**
 
 ## Installation
 
