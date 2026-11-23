@@ -79,7 +79,8 @@ std::uintptr_t findModuleBase(const char* soName) {
         if (newline) *newline = '\0';
         const char* slash = std::strrchr(path, '/');
         if (!slash || std::strcmp(slash + 1, soName) != 0) continue;
-        if (offset == 0 && (best == 0 || start < best)) best = static_cast<std::uintptr_t>(start);
+        if (offset == 0 && perms[2] == 'x' && (best == 0 || start < best))
+            best = static_cast<std::uintptr_t>(start);
     }
     std::fclose(f);
     return best;
